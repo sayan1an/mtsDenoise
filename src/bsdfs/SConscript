@@ -20,6 +20,9 @@ plugins += env.SharedLibrary('roughcoating', ['roughcoating.cpp'])
 plugins += env.SharedLibrary('bumpmap', ['bumpmap.cpp'])
 plugins += env.SharedLibrary('normalmap', ['normalmap.cpp'])
 
+#custom
+plugins += env.SharedLibrary('simplemicrofacet', ['custom/SimpleMicrofacet.cpp'])
+
 # Other materials
 plugins += env.SharedLibrary('ward', ['ward.cpp'])
 plugins += env.SharedLibrary('phong', ['phong.cpp'])

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 
 <scene version="0.6.0" >
-	<integrator type="aaf" >
+	<integrator type="direct" >
 		<integer name="maxDepth" value="65" />
 		<boolean name="strictNormals" value="true" />
 	</integrator>
@@ -23,101 +23,70 @@
 			<rfilter type="tent" />
 		</film>
 	</sensor>
-	<bsdf type="twosided" id="Backdrop" >
-		<bsdf type="diffuse" >
+	<bsdf type="diffuse" id="Backdrop" >
 			<rgb name="reflectance" value="0.1, 0.1, 0.1"/>
-		</bsdf>
 	</bsdf>
-	<bsdf type="twosided" id="RoughAluminium" >
-		<bsdf type="roughconductor" >
-			<float name="alpha" value="0.1" />
-			<string name="distribution" value="ggx" />
-			<float name="extEta" value="1" />
-			<rgb name="specularReflectance" value="0.578596, 0.578596, 0.578596"/>
-			<rgb name="eta" value="1.65746, 0.880369, 0.521229"/>
-			<rgb name="k" value="9.22387, 6.26952, 4.837"/>
-		</bsdf>
+	<bsdf type="simplemicrofacet" id="RoughAluminium" >
+		<float name="alpha" value="0.1" />
+		<string name="distribution" value="ggx" />
+		<rgb name="specularReflectance" value="0.578596, 0.578596, 0.578596"/>
 	</bsdf>
-	<bsdf type="twosided" id="RoughSteel" >
-		<bsdf type="roughconductor" >
-			<float name="alpha" value="0.1" />
-			<string name="distribution" value="ggx" />
-			<float name="extEta" value="1" />
-			<rgb name="specularReflectance" value="1, 1, 1"/>
-			<rgb name="eta" value="2, 2, 2"/>
-			<rgb name="k" value="0, 0, 0"/>
-		</bsdf>
+	<bsdf type="simplemicrofacet" id="RoughSteel" >
+		<float name="alpha" value="0.1" />
+		<string name="distribution" value="ggx" />
+		<rgb name="specularReflectance" value="1, 1, 1"/>
 	</bsdf>
-	<bsdf type="twosided" id="DarkPlastic" >
-		<bsdf type="roughplastic" >
-			<float name="alpha" value="0.2" />
-			<string name="distribution" value="beckmann" />
-			<float name="intIOR" value="1.5" />
-			<float name="extIOR" value="1" />
-			<boolean name="nonlinear" value="true" />
-			<rgb name="diffuseReflectance" value="0.01, 0.01, 0.01"/>
-		</bsdf>
+	<bsdf type="simplemicrofacet" id="DarkPlastic" >
+		<float name="alpha" value="0.2" />
+		<string name="distribution" value="beckmann" />
+		<float name="intIOR" value="1.5" />
+		<float name="extIOR" value="1" />
+		<rgb name="diffuseReflectance" value="0.01, 0.01, 0.01"/>
 	</bsdf>
-	<bsdf type="twosided" id="PinkLeather" >
-		<bsdf type="roughplastic" >
-			<float name="alpha" value="0.4" />
-			<string name="distribution" value="beckmann" />
-			<float name="intIOR" value="1.5" />
-			<float name="extIOR" value="1" />
-			<boolean name="nonlinear" value="true" />
-			<rgb name="diffuseReflectance" value="0.256, 0.013, 0.08"/>
-		</bsdf>
+	<bsdf type="simplemicrofacet" id="PinkLeather" >
+		<float name="alpha" value="0.4" />
+		<string name="distribution" value="beckmann" />
+		<float name="intIOR" value="1.5" />
+		<float name="extIOR" value="1" />
+		<rgb name="diffuseReflectance" value="0.256, 0.013, 0.08"/>
 	</bsdf>
-	<bsdf type="twosided" id="Leather" >
-		<bsdf type="roughplastic" >
-			<float name="alpha" value="0.4" />
-			<string name="distribution" value="beckmann" />
-			<float name="intIOR" value="1.5" />
-			<float name="extIOR" value="1" />
-			<boolean name="nonlinear" value="true" />
-			<rgb name="diffuseReflectance" value="0.034, 0.014, 0.008"/>
-		</bsdf>
+	<bsdf type="simplemicrofacet" id="Leather" >
+		<float name="alpha" value="0.4" />
+		<string name="distribution" value="beckmann" />
+		<float name="intIOR" value="1.5" />
+		<float name="extIOR" value="1" />
+		<rgb name="diffuseReflectance" value="0.034, 0.014, 0.008"/>
 	</bsdf>
-	<bsdf type="twosided" id="RedLeather" >
-		<bsdf type="roughplastic" >
-			<float name="alpha" value="0.4" />
-			<string name="distribution" value="beckmann" />
-			<float name="intIOR" value="1.5" />
-			<float name="extIOR" value="1" />
-			<boolean name="nonlinear" value="true" />
-			<rgb name="diffuseReflectance" value="0.163, 0.03, 0.037"/>
-		</bsdf>
+	<bsdf type="simplemicrofacet" id="RedLeather" >
+		<float name="alpha" value="0.4" />
+		<string name="distribution" value="beckmann" />
+		<float name="intIOR" value="1.5" />
+		<float name="extIOR" value="1" />
+		<rgb name="diffuseReflectance" value="0.163, 0.03, 0.037"/>
 	</bsdf>
-	<bsdf type="twosided" id="BrightPinkLeather" >
-		<bsdf type="roughplastic" >
-			<float name="alpha" value="0.4" />
-			<string name="distribution" value="beckmann" />
-			<float name="intIOR" value="1.5" />
-			<float name="extIOR" value="1" />
-			<boolean name="nonlinear" value="true" />
-			<rgb name="diffuseReflectance" value="0.772, 0.175, 0.262"/>
-		</bsdf>
+	<bsdf type="simplemicrofacet" id="BrightPinkLeather" >
+		<float name="alpha" value="0.4" />
+		<string name="distribution" value="beckmann" />
+		<float name="intIOR" value="1.5" />
+		<float name="extIOR" value="1" />
+		<boolean name="nonlinear" value="true" />
+		<rgb name="diffuseReflectance" value="0.772, 0.175, 0.262"/>
 	</bsdf>
-	<bsdf type="roughdielectric" id="Glass" >
+	<bsdf type="simplemicrofacet" id="Glass" >
 		<float name="alpha" value="0.01" />
 		<string name="distribution" value="ggx" />
 		<float name="intIOR" value="1.5" />
 		<float name="extIOR" value="1" />
 	</bsdf>
-	<bsdf type="twosided" id="DarkRubber" >
-		<bsdf type="roughplastic" >
-			<float name="alpha" value="0.4" />
-			<string name="distribution" value="ggx" />
-			<float name="intIOR" value="1.5" />
-			<float name="extIOR" value="1" />
-			<boolean name="nonlinear" value="true" />
-			<rgb name="diffuseReflectance" value="0.025, 0.025, 0.025"/>
-		</bsdf>
+	<bsdf type="simplemicrofacet" id="DarkRubber" >
+		<float name="alpha" value="0.4" />
+		<string name="distribution" value="ggx" />
+		<float name="intIOR" value="1.5" />
+		<float name="extIOR" value="1" />
+		<rgb name="diffuseReflectance" value="0.025, 0.025, 0.025"/>
 	</bsdf>
-	<bsdf type="twosided" id="Black" >
-		<bsdf type="diffuse" >
-			<rgb name="reflectance" value="0, 0, 0"/>
-		</bsdf>
+	<bsdf type="diffuse" id="Black" >
+		<rgb name="reflectance" value="0, 0, 0"/>
 	</bsdf>
 	<shape type="obj" >
 		<string name="filename" value="models/Mesh050.obj" />
@@ -261,10 +230,8 @@
 		<transform name="toWorld" >
 			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>
 		</transform>
-		<bsdf type="twosided" >
-			<bsdf type="diffuse" >
+		<bsdf type="diffuse" >
 				<rgb name="reflectance" value="0.772, 0.175, 0.262"/>
-			</bsdf>
 		</bsdf>
 		<!--
 		<emitter type="area" >
@@ -796,10 +763,8 @@
 		<transform name="toWorld" >
 			<matrix value="2.04973 -9.60975e-008 9.60975e-008 0 3.09501e-007 2.7819e-008 -0.636425 5.14472 3.09501e-007 0.636425 2.7819e-008 1.61079 0 0 0 1"/>
 		</transform>
-		<bsdf type="twosided" >
-			<bsdf type="diffuse" >
+		<bsdf type="diffuse" >
 				<rgb name="reflectance" value="0, 0, 0"/>
-			</bsdf>
 		</bsdf>
 		<emitter type="area" >
 			<rgb name="radiance" value="9, 9, 10"/>
@@ -810,10 +775,8 @@
 		<transform name="toWorld" >
 			<matrix value="2.04973 -9.60975e-008 9.60975e-008 0 3.09501e-007 2.7819e-008 -0.636425 5.14472 3.09501e-007 0.636425 2.7819e-008 -1.61079 0 0 0 1"/>
 		</transform>
-		<bsdf type="twosided" >
-			<bsdf type="diffuse" >
-				<rgb name="reflectance" value="0, 0, 0"/>
-			</bsdf>
+		<bsdf type="diffuse" >
+		<rgb name="reflectance" value="0, 0, 0"/>
 		</bsdf>
 		<emitter type="area" >
 			<rgb name="radiance" value="9, 9, 10"/>
