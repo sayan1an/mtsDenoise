@@ -230,7 +230,8 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
  */
 
  struct PerRayData {
-    Color3 color;
+    Spectrum diffColor;
+    Spectrum specColor;
     Normal normal;
     Point3f hit;
     int objectId;
@@ -339,7 +340,7 @@ public:
             auto accumulate = [&](const Point2& pixel, const PerRayData& value) {
                 Spectrum *throughputPix = (Spectrum *) data.image->getData();
                 size_t curr_pix = ((int)pixel.y) * cropSize.x + ((int)pixel.x);
-                throughputPix[curr_pix].fromLinearRGB(value.normal.x, value.normal.y, value.normal.z);
+                throughputPix[curr_pix] = value.specColor; //.fromLinearRGB(value.diffColor.x, value.diffColor.y, value.diffColor.z);
             };
 
             // Other things from MTS
@@ -405,7 +406,8 @@ public:
 		ray.mint = Epsilon;
 
         prd.normal = its.shFrame.n;
-        prd.color = its.color;
+        prd.diffColor = its.getBSDF(ray)->getDiffuseReflectance(its);
+        prd.specColor = its.getBSDF(ray)->getSpecularReflectance(its);
     }
     
 

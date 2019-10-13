@@ -30,7 +30,7 @@ public:
         m_specularReflectance = new ConstantSpectrumTexture(
             props.getSpectrum("specularReflectance", Spectrum(1.0f)));
         m_diffuseReflectance = new ConstantSpectrumTexture(
-            props.getSpectrum("diffuseReflectance", Spectrum(0.001f)));
+            props.getSpectrum("diffuseReflectance", Spectrum(0.5f)));
 
         /* Specifies the internal index of refraction at the interface */
         Float intIOR = lookupIOR(props, "intIOR", "benzene");
