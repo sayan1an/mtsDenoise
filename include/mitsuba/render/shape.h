@@ -182,7 +182,7 @@ public:
     // =============================================================
 
     /// Return the name of this shape (e.g. the filename)
-    virtual std::string getName() const;
+	virtual std::string getName() const;
 
     /// Is this a compound shape consisting of several sub-objects?
     virtual bool isCompound() const;

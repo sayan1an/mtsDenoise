@@ -113,11 +113,11 @@ public:
     }
 
     Spectrum getDiffuseReflectance(const Intersection &its) const {
-        return m_diffuseReflectance->eval(its);
+        return m_diffuseReflectance->eval(its) * (1 - m_specularSamplingWeight);
     }
 
     Spectrum getSpecularReflectance(const Intersection &its) const {
-        return m_specularReflectance->eval(its);
+        return m_specularReflectance->eval(its) * m_specularSamplingWeight;
     }
 
     /// Helper function: reflect \c wi with respect to a given surface normal
@@ -166,11 +166,11 @@ public:
 
             //if ( m_specularReflectance->getAverage().getLuminance() > 0.5f)
            // std::cout <<  m_specularReflectance->getAverage().getLuminance() << " " << m_diffuseReflectance->getAverage().getLuminance() << " " << hasDiffuse << " " << hasSpecular << std::endl;
-            result += m_specularReflectance->eval(bRec.its) * value;
+            result += m_specularReflectance->eval(bRec.its) * value * m_specularSamplingWeight;
         }
 
         if (hasDiffuse)
-            result += m_diffuseReflectance->eval(bRec.its) * (INV_PI * Frame::cosTheta(bRec.wo));
+            result += m_diffuseReflectance->eval(bRec.its) * (INV_PI * Frame::cosTheta(bRec.wo)) * (1 - m_specularSamplingWeight);
         
 
         return result;

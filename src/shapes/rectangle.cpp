@@ -118,6 +118,10 @@ public:
         return aabb;
     }
 
+    std::string getName() const {
+        return std::string("rectangle");
+    }
+
     Float getSurfaceArea() const {
         return m_dpdu.length() * m_dpdv.length();
     }
