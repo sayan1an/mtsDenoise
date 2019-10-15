@@ -304,9 +304,11 @@ public:
 		for (auto emitter : scene->getEmitters()) {
 			if (emitter->isOnSurface() &&
 				emitter->getShape() != NULL) {
-				if (emitter->getShape()->getName().compare("rectangle") != 0) {
-					std::cerr << "AAF: Ignoring emitter geometry other than Rectangle/Parallelogram." << std::endl;
+				if (emitter->getShape()->getName().compare("rectangle") == 0) {
+					Point p = emitter->getShape()->getCenter();
 				}
+				else
+					std::cerr << "AAF: Ignoring emitter geometry other than Rectangle/Parallelogram." << std::endl;
 			}
 		}
 	}
@@ -321,7 +323,7 @@ public:
         ref<Sensor> sensor = static_cast<Sensor *>(sched->getResource(sensorResID));
         ref<Film> film = sensor->getFilm();
         auto cropSize = film->getCropSize();
-        size_t nCores = 1; //sched->getCoreCount();
+		size_t nCores = sched->getCoreCount();
         Sampler *sampler_main = static_cast<Sampler *>(sched->getResource(samplerResID, 0));
         size_t sampleCount = sampler_main->getSampleCount();
 
@@ -330,37 +332,28 @@ public:
             sampleCount, sampleCount == 1 ? "sample" : "samples", nCores,
             nCores == 1 ? "core" : "cores");
 
+		// global buffer
+		PerRayData *gBuffer = new PerRayData[cropSize.x * cropSize.y * sampleCount];
+
         // Results for saving the computation
         ref<Bitmap> result = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, cropSize);
         result->clear();
+
         struct ThreadData {
             ref<Sampler> sampler;
-            ref<Bitmap> image;
-            PerRayData *prd;
         };
+
         std::vector<ThreadData> threadData;
         for(auto i = 0; i < nCores; i++) {
             threadData.emplace_back(ThreadData {
-                    sampler_main->clone(),
-                    result->clone(),
-                    new PerRayData[cropSize.x * cropSize.y]
+                    sampler_main->clone()
             });
         }
 
-        BlockScheduler runPool(nCores, nCores, 1);
-        runPool.run([&](int tileID, int threadID) {
-            ThreadData& data = threadData[threadID];
-            auto sampler = data.sampler.get();
-
-            auto accumulate = [&](const Point2& pixel, const PerRayData& value) {
-                Spectrum *throughputPix = (Spectrum *) data.image->getData();
-                size_t curr_pix = ((int)pixel.y) * cropSize.x + ((int)pixel.x);
-                throughputPix[curr_pix] = value.specColor; //.fromLinearRGB(value.diffColor.x, value.diffColor.y, value.diffColor.z);
-            };
-
-            // Other things from MTS
-            Float diffScaleFactor = 1.0f /
-                                    std::sqrt((Float) sampler->getSampleCount());
+        BlockScheduler runPool((int)cropSize.x * cropSize.y, nCores, 1);
+        runPool.run([&](int pixelID, int threadID) {
+			ThreadData &td = threadData[threadID];
+			auto sampler = td.sampler.get();
 
             bool needsApertureSample = sensor->needsApertureSample();
             bool needsTimeSample = sensor->needsTimeSample();
@@ -371,47 +364,59 @@ public:
             RayDifferential sensorRay;
             uint32_t queryType = RadianceQueryRecord::ESensorRay;
 
-//            if (!sensor->getFilm()->hasAlpha()) /* Don't compute an alpha channel if we don't have to */
-//                queryType &= ~RadianceQueryRecord::EOpacity;
+			int i = pixelID % cropSize.x;
+			int j = pixelID / cropSize.x;
 
-            for (size_t i = 0; i < cropSize.x; ++i) {
-                for (size_t j = 0; j < cropSize.y; ++j) {
-                    Point2i offset = Point2i(i, j);
-                    sampler->generate(offset);
+            Point2i offset = Point2i(i, j);
+			sampler->generate(offset);
+			for (size_t k = 0; k < sampleCount; k++) {
+				rRec.newQuery(queryType, sensor->getMedium());
+                Point2 samplePos(Point2(offset) + Vector2(rRec.nextSample2D()));
 
-                    //for (size_t k = 0; k < sampler->getSampleCount(); k++) {
-                    rRec.newQuery(queryType, sensor->getMedium());
-                    Point2 samplePos(Point2(offset) + Vector2(0.5f, 0.5f));
+                if (needsApertureSample)
+					apertureSample = rRec.nextSample2D();
+                if (needsTimeSample)
+                    timeSample = rRec.nextSample1D();
 
-                    if (needsApertureSample)
-                        apertureSample = rRec.nextSample2D();
-                    if (needsTimeSample)
-                        timeSample = rRec.nextSample1D();
-
-                    Spectrum spec = sensor->sampleRayDifferential(
-                            sensorRay, samplePos, apertureSample, timeSample);
-
-                    sensorRay.scaleDifferential(diffScaleFactor);
-
-                    gBufferPass(sensorRay, rRec, data.prd[(int)samplePos.y * cropSize.x + (int)samplePos.x]);
-                    //spec *= Li(sensorRay, rRec);
-                    accumulate(samplePos, data.prd[(int)samplePos.y * cropSize.x + (int)samplePos.x]);
-                    sampler->advance();
-                    //}
-                }
+                sensor->sampleRayDifferential(
+					sensorRay, samplePos, apertureSample, timeSample);
+				gBufferPass(sensorRay, rRec, gBuffer[(j * cropSize.x + i) *  sampleCount + k]);
+                sampler->advance();
             }
         });
 
-        // Save the results
-        for(auto res: threadData) {
-            result->accumulate(res.image);
-        }
-        result->scale(1.0 / nCores); // Average across the different cores
+		std::cout << "Finished GBuffer pass." << std::endl;
+		gBufferToImage(result, gBuffer, cropSize, sampleCount);
         film->setBitmap(result);
-
-
-        return true;
+		
+		return true;
     }
+
+	void gBufferToImage(ref<Bitmap> &result, const PerRayData *gBuffer, const Vector2i &cropSize, const size_t sampleCount) {
+		int select = 0;
+
+		Spectrum *throughputPix = (Spectrum *)result->getData();
+		Spectrum value(0.0f);
+
+		for (size_t j = 0; j < cropSize.y; j++)
+			for (size_t i = 0; i < cropSize.x; i++) {
+				size_t currPix = j * cropSize.x + i;
+				
+				for (size_t k = 0; k < sampleCount; k++) {
+					const PerRayData &prd = gBuffer[currPix *  sampleCount + k];
+					if (select == 0)
+						value.fromLinearRGB(prd.normal.x, prd.normal.y, prd.normal.z);
+					else if (select == 1)
+						value = prd.diffColor;
+					else if (select == 2)
+						value = prd.specColor;
+
+					throughputPix[currPix] += value;
+				}
+
+			}
+		result->scale(1.0f / sampleCount);
+	}
 
     void gBufferPass(const RayDifferential &primaryRay, RadianceQueryRecord &rRec, PerRayData &prd) {
         //const Scene *scene = rRec.scene;

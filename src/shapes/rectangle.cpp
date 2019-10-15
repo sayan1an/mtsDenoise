@@ -109,6 +109,10 @@ public:
             Log(EError, "Error: 'toWorld' transformation contains shear!");
     }
 
+	Point getCenter() const {
+		return m_objectToWorld(Point(0, 0, 0));
+	}
+
     AABB getAABB() const {
         AABB aabb;
         aabb.expandBy(m_objectToWorld(Point(-1, -1, 0)));

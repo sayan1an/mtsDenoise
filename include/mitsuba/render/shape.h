@@ -209,6 +209,11 @@ public:
     /// Return a bounding box containing the shape
     virtual AABB getAABB() const = 0;
 
+	virtual Point getCenter() const {
+		std::cerr << "Shape::getCenter() Not implemented." << std::endl;
+		return Point(0, 0, 0);
+	}
+
     /**
      * \brief Returns the minimal axis-aligned bounding box
      * of this shape when clipped to another bounding box.
