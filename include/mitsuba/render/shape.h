@@ -214,6 +214,11 @@ public:
 		return Point(0, 0, 0);
 	}
 
+	virtual Frame getFrame() const {
+		std::cerr << "Shape::getFrame() Not implemented." << std::endl;
+		return Frame();
+	}
+
     /**
      * \brief Returns the minimal axis-aligned bounding box
      * of this shape when clipped to another bounding box.

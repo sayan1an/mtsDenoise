@@ -241,25 +241,28 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
  struct PerPixelData {
 	 Float *d1;
 	 Float *d2Max; // Use for primal filter size 
-	 Float *d1Max; // Use for computing adaptive sampling rates
+	 Float *d2Min; // Use for computing adaptive sampling rates
 
 	 Float *beta; // primal filter size
-	 Spectrum color;
+	 Spectrum *colorEmitter; // color for each emiiter
+	 Spectrum color; // color for direct hit to light source
 
 	 void init(size_t nEmitters) {
 		 d1 = new Float[nEmitters];
 		 d2Max = new Float[nEmitters];
-		 d1Max = new Float[nEmitters];
+		 d2Min = new Float[nEmitters];
 
 		 beta = new Float[nEmitters];
+		 colorEmitter = new Spectrum[nEmitters];
 
 		 for (size_t i = 0; i < nEmitters; i++) {
 			 beta[i] = 1;
 			 d1[i] = 0;
-			 d2Max[i] = 0;
-			 d1Max[i] = 0;
+			 d2Max[i] = std::numeric_limits<Float>::min();
+			 d2Min[i] = std::numeric_limits<Float>::max();
+			 colorEmitter[i] = Spectrum(0.0f);
 		 }
-		 
+
 		 color = Spectrum(0.0f);
 	 }
 
@@ -360,10 +363,10 @@ public:
 
 		// global buffer
 		PrimaryRayData *gBuffer = new PrimaryRayData[cropSize.x * cropSize.y * sampleCount];
-		std::vector<Point> emitterCenter;
+		std::vector<Point> emitterCenters;
 		PerPixelData *ppd = new PerPixelData[cropSize.x * cropSize.y];
 
-		collectEmitterParameters(scene, emitterCenter);
+		collectEmitterParameters(scene, emitterCenters);
 				
         // Results for saving the computation
         ref<Bitmap> result = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, cropSize);
@@ -410,50 +413,45 @@ public:
 
                 sensor->sampleRayDifferential(
 					sensorRay, samplePos, apertureSample, timeSample);
-				gBufferPass(sensorRay, rRec, gBuffer[(j * cropSize.x + i) *  sampleCount + k]);
+				gBufferPass(sensorRay, rRec, gBuffer[pixelID *  sampleCount + k]);
                 sampler->advance();
             }
 
-			ppd[pixelID].init(emitterCenter.size());
+			ppd[pixelID].init(emitterCenters.size());
         });
 
 		std::cout << "Finished GBuffer pass." << std::endl;
-		gBufferToImage(result, gBuffer, cropSize, sampleCount);
+
+		runPool.run([&](int pixelID, int threadID) {
+			ThreadData &td = threadData[threadID];
+			auto sampler = td.sampler.get();
+			RadianceQueryRecord rRec(scene, sampler);
+			
+			int i = pixelID % cropSize.x;
+			int j = pixelID / cropSize.x;
+			sampler->generate(Point2i(i, j));
+
+			for (size_t k = 0; k < sampleCount; k++) {
+				collectSamples(rRec, gBuffer[pixelID *  sampleCount + k], ppd[pixelID], emitterCenters);
+				sampler->advance();
+			}
+
+			for (size_t k = 0; k < emitterCenters.size(); k++)
+				ppd[pixelID].colorEmitter[k] /= (float)sampleCount;
+
+			ppd[pixelID].color /= (float)sampleCount;
+		});
+
+		std::cout << "Finished Data-collection and adaptive sampling pass." << std::endl;
+
+		pBufferToImage(result, ppd, cropSize, (int)emitterCenters.size());
+		//gBufferToImage(result, gBuffer, cropSize, sampleCount);
         film->setBitmap(result);
 		
 		return true;
     }
 
-	void gBufferToImage(ref<Bitmap> &result, const PrimaryRayData *gBuffer, const Vector2i &cropSize, const size_t sampleCount) {
-		int select = 1;
-
-		Spectrum *throughputPix = (Spectrum *)result->getData();
-		Spectrum value(0.0f);
-
-		for (size_t j = 0; j < cropSize.y; j++)
-			for (size_t i = 0; i < cropSize.x; i++) {
-				size_t currPix = j * cropSize.x + i;
-				
-				for (size_t k = 0; k < sampleCount; k++) {
-					const PrimaryRayData &prd = gBuffer[currPix *  sampleCount + k];
-					if (select == 0)
-						value.fromLinearRGB(prd.its->shFrame.n.x, prd.its->shFrame.n.y, prd.its->shFrame.n.z);
-					else if (select == 1)
-						value = prd.its->getBSDF(*prd.primaryRay)->getDiffuseReflectance(*prd.its);
-					else if (select == 2)
-						value = prd.its->getBSDF(*prd.primaryRay)->getSpecularReflectance(*prd.its);
-					else if (select == 3)
-						value = prd.its->color; // vertex interpolated color
-					else
-						std::cerr << "gNufferToImage:Undefined choice." << std::endl;
-
-					throughputPix[currPix] += value;
-				}
-			}
-		result->scale(1.0f / sampleCount);
-	}
-
-    void gBufferPass(const RayDifferential &primaryRay, RadianceQueryRecord &rRec, PrimaryRayData &prd) {
+	 void gBufferPass(const RayDifferential &primaryRay, RadianceQueryRecord &rRec, PrimaryRayData &prd) {
         Intersection &its = rRec.its;
 		RayDifferential ray(primaryRay);
         bool intersect = rRec.rayIntersect(ray);
@@ -474,44 +472,107 @@ public:
 		prd.objectId = 0;
     }
 
-	void collectSamples(Sampler *sampler, RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd) {
+	void collectSamples(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd, const std::vector<Point> &emitterCenters) {
 		if (prd.objectId == -2)
 			return;
 		else if (prd.objectId == -1) {
 			ppd.color += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
-
-		
+				
 		size_t nEmitterSamples = 9;
 
-		DirectSamplingRecord dRec;
-		dRec.ref = prd.its->p;
-		dRec.refN = prd.its->shFrame.n;
-
-		Point2 *sampleArray;
+		DirectSamplingRecord dRec(*prd.its);
+		
 		const Scene *scene = rRec.scene;
-		Intersection &its = rRec.its;
-
+		Intersection its;
+		
+		int emitterIdx = 0;
 		for (auto emitter : scene->getEmitters()) {
 			if (emitter->isOnSurface() &&
 				emitter->getShape() != NULL &&
 				emitter->getShape()->getName().compare("rectangle") == 0) {
 
-				Spectrum emitterColor(0.0f);
-				sampleArray = sampler->next2DArray(nEmitterSamples);
-
+				// This implementation doesn't look right
+				// Read soler et. al 1998 for r(x) term
+				// read egan 11a and 11b
+				Spectrum unshadowedIrradiance = getUnshadowedIrradiance(emitter, emitterCenters[emitterIdx], *prd.its, prd.its->getBSDF(*prd.primaryRay));
+				Float hitCount = 0;
 				for (size_t i = 0; i < nEmitterSamples; i++) {
-					Spectrum value = emitter->sampleDirect(dRec, sampleArray[i]);
+					Spectrum value = emitter->sampleDirect(dRec, rRec.nextSample2D());
 					RayDifferential shadowRay(prd.its->p, dRec.d, prd.primaryRay->time);
-					bool intersect = rRec.rayIntersect(shadowRay);
-
-
+					bool intersect = scene->rayIntersect(shadowRay, its);
+					hitCount += intersect && its.isEmitter() ? 1 : 0;
 				}
+
+				ppd.colorEmitter[emitterIdx] += unshadowedIrradiance * Spectrum(hitCount / (Float)nEmitterSamples);
+
+				emitterIdx++;
 			}
+
 		}
 	}
+
+	Spectrum getUnshadowedIrradiance(const Emitter *emitter, const Point &emitterHit, const Intersection &receiverIts, const BSDF *bsdf) {
+		Vector emitterDirection = emitterHit - receiverIts.p;
+		Float r_2 = dot(emitterDirection, emitterDirection);
+		Float r = sqrt(r_2);
+		emitterDirection /= r;
+		Frame emitterFrame = emitter->getShape()->getFrame();
+		Float cosEmitter = dot(emitterFrame.n, emitterDirection);
+		if (cosEmitter >= 0)
+			return Spectrum(0.0f);
+
+		BSDFSamplingRecord bRec(receiverIts, receiverIts.toLocal(emitterDirection));
+		Spectrum radiance = emitter->eval(receiverIts, emitterDirection);
+		
+		return radiance * bsdf->eval(bRec) * abs(cosEmitter) / r_2;
+	}
    
+	void gBufferToImage(ref<Bitmap> &result, const PrimaryRayData *gBuffer, const Vector2i &cropSize, const size_t sampleCount) {
+		int select = 1;
+
+		Spectrum *throughputPix = (Spectrum *)result->getData();
+		Spectrum value(0.0f);
+
+		for (size_t j = 0; j < cropSize.y; j++)
+			for (size_t i = 0; i < cropSize.x; i++) {
+				size_t currPix = j * cropSize.x + i;
+
+				for (size_t k = 0; k < sampleCount; k++) {
+					const PrimaryRayData &prd = gBuffer[currPix *  sampleCount + k];
+					if (select == 0)
+						value.fromLinearRGB(prd.its->shFrame.n.x, prd.its->shFrame.n.y, prd.its->shFrame.n.z);
+					else if (select == 1)
+						value = prd.its->getBSDF(*prd.primaryRay)->getDiffuseReflectance(*prd.its);
+					else if (select == 2)
+						value = prd.its->getBSDF(*prd.primaryRay)->getSpecularReflectance(*prd.its);
+					else if (select == 3)
+						value = prd.its->color; // vertex interpolated color
+					else
+						std::cerr << "gNufferToImage:Undefined choice." << std::endl;
+
+					throughputPix[currPix] += value;
+				}
+			}
+		result->scale(1.0f / sampleCount);
+	}
+
+	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize, const int nEmitters) {
+		Spectrum *throughputPix = (Spectrum *)result->getData();
+		
+		for (size_t j = 0; j < cropSize.y; j++)
+			for (size_t i = 0; i < cropSize.x; i++) {
+				size_t currPix = j * cropSize.x + i;
+				const PerPixelData &pData = pBuffer[currPix];
+				throughputPix[currPix] = pData.color;
+
+				for (int k = 0; k < nEmitters; k++) {
+					throughputPix[currPix] += pData.colorEmitter[k];
+				}
+			}
+	}
+	
 	void serialize(Stream *stream, InstanceManager *manager) const {
         Integrator::serialize(stream, manager);
 	}

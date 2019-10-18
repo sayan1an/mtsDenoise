@@ -113,6 +113,10 @@ public:
 		return m_objectToWorld(Point(0, 0, 0));
 	}
 
+	Frame getFrame() const {
+		return m_frame;
+	}
+
     AABB getAABB() const {
         AABB aabb;
         aabb.expandBy(m_objectToWorld(Point(-1, -1, 0)));
