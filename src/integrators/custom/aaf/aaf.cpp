@@ -230,12 +230,39 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
  * }
  */
 
- struct PerRayData {
-    Spectrum diffColor;
-    Spectrum specColor;
-    Normal normal;
-    Point3f hit;
+ struct PrimaryRayData {
+	Intersection *its;
+	RayDifferential *primaryRay;
     int objectId;
+ };
+
+ // Ideally one would adaptively sampling each source and run the filter in image space for each source seperately
+ // One optimization would be combine similar size filters into one on per pixel basis.
+ struct PerPixelData {
+	 Float *d1;
+	 Float *d2Max; // Use for primal filter size 
+	 Float *d1Max; // Use for computing adaptive sampling rates
+
+	 Float *beta; // primal filter size
+	 Spectrum color;
+
+	 void init(size_t nEmitters) {
+		 d1 = new Float[nEmitters];
+		 d2Max = new Float[nEmitters];
+		 d1Max = new Float[nEmitters];
+
+		 beta = new Float[nEmitters];
+
+		 for (size_t i = 0; i < nEmitters; i++) {
+			 beta[i] = 1;
+			 d1[i] = 0;
+			 d2Max[i] = 0;
+			 d1Max[i] = 0;
+		 }
+		 
+		 color = Spectrum(0.0f);
+	 }
+
  };
 
 class AAF : public Integrator {
@@ -300,12 +327,13 @@ public:
 
 	}
 
-	void collectEmitterParameters(Scene *scene) {
+	void collectEmitterParameters(Scene *scene, std::vector<Point> &emitterCenter) {
 		for (auto emitter : scene->getEmitters()) {
 			if (emitter->isOnSurface() &&
 				emitter->getShape() != NULL) {
 				if (emitter->getShape()->getName().compare("rectangle") == 0) {
-					Point p = emitter->getShape()->getCenter();
+					Point c = emitter->getShape()->getCenter();
+					emitterCenter.push_back(c);
 				}
 				else
 					std::cerr << "AAF: Ignoring emitter geometry other than Rectangle/Parallelogram." << std::endl;
@@ -317,9 +345,7 @@ public:
                 RenderQueue *queue, const RenderJob *job,
                 int sceneResID, int sensorResID, int samplerResID) {
 
-		collectEmitterParameters(scene);
-
-        ref<Scheduler> sched = Scheduler::getInstance();
+		ref<Scheduler> sched = Scheduler::getInstance();
         ref<Sensor> sensor = static_cast<Sensor *>(sched->getResource(sensorResID));
         ref<Film> film = sensor->getFilm();
         auto cropSize = film->getCropSize();
@@ -333,8 +359,12 @@ public:
             nCores == 1 ? "core" : "cores");
 
 		// global buffer
-		PerRayData *gBuffer = new PerRayData[cropSize.x * cropSize.y * sampleCount];
+		PrimaryRayData *gBuffer = new PrimaryRayData[cropSize.x * cropSize.y * sampleCount];
+		std::vector<Point> emitterCenter;
+		PerPixelData *ppd = new PerPixelData[cropSize.x * cropSize.y];
 
+		collectEmitterParameters(scene, emitterCenter);
+				
         // Results for saving the computation
         ref<Bitmap> result = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, cropSize);
         result->clear();
@@ -350,7 +380,7 @@ public:
             });
         }
 
-        BlockScheduler runPool((int)cropSize.x * cropSize.y, nCores, 1);
+        BlockScheduler runPool(cropSize.x * cropSize.y, (int)nCores, 1);
         runPool.run([&](int pixelID, int threadID) {
 			ThreadData &td = threadData[threadID];
 			auto sampler = td.sampler.get();
@@ -383,6 +413,8 @@ public:
 				gBufferPass(sensorRay, rRec, gBuffer[(j * cropSize.x + i) *  sampleCount + k]);
                 sampler->advance();
             }
+
+			ppd[pixelID].init(emitterCenter.size());
         });
 
 		std::cout << "Finished GBuffer pass." << std::endl;
@@ -392,8 +424,8 @@ public:
 		return true;
     }
 
-	void gBufferToImage(ref<Bitmap> &result, const PerRayData *gBuffer, const Vector2i &cropSize, const size_t sampleCount) {
-		int select = 0;
+	void gBufferToImage(ref<Bitmap> &result, const PrimaryRayData *gBuffer, const Vector2i &cropSize, const size_t sampleCount) {
+		int select = 1;
 
 		Spectrum *throughputPix = (Spectrum *)result->getData();
 		Spectrum value(0.0f);
@@ -403,38 +435,81 @@ public:
 				size_t currPix = j * cropSize.x + i;
 				
 				for (size_t k = 0; k < sampleCount; k++) {
-					const PerRayData &prd = gBuffer[currPix *  sampleCount + k];
+					const PrimaryRayData &prd = gBuffer[currPix *  sampleCount + k];
 					if (select == 0)
-						value.fromLinearRGB(prd.normal.x, prd.normal.y, prd.normal.z);
+						value.fromLinearRGB(prd.its->shFrame.n.x, prd.its->shFrame.n.y, prd.its->shFrame.n.z);
 					else if (select == 1)
-						value = prd.diffColor;
+						value = prd.its->getBSDF(*prd.primaryRay)->getDiffuseReflectance(*prd.its);
 					else if (select == 2)
-						value = prd.specColor;
+						value = prd.its->getBSDF(*prd.primaryRay)->getSpecularReflectance(*prd.its);
+					else if (select == 3)
+						value = prd.its->color; // vertex interpolated color
+					else
+						std::cerr << "gNufferToImage:Undefined choice." << std::endl;
 
 					throughputPix[currPix] += value;
 				}
-
 			}
 		result->scale(1.0f / sampleCount);
 	}
 
-    void gBufferPass(const RayDifferential &primaryRay, RadianceQueryRecord &rRec, PerRayData &prd) {
-        //const Scene *scene = rRec.scene;
-		Intersection &its = rRec.its;
+    void gBufferPass(const RayDifferential &primaryRay, RadianceQueryRecord &rRec, PrimaryRayData &prd) {
+        Intersection &its = rRec.its;
 		RayDifferential ray(primaryRay);
-        rRec.rayIntersect(ray);
+        bool intersect = rRec.rayIntersect(ray);
 		ray.mint = Epsilon;
 
-        prd.normal = its.shFrame.n;
-        prd.diffColor = its.getBSDF(ray)->getDiffuseReflectance(its);
-        prd.specColor = its.getBSDF(ray)->getSpecularReflectance(its);
+		prd.primaryRay = new RayDifferential(primaryRay);
+		prd.its = new Intersection(rRec.its);
+		
+		if (!intersect) {
+			prd.objectId = -2;
+			return;
+		}
+		else if (intersect && its.isEmitter()) {
+			prd.objectId = -1;
+			return;
+		}
+		      
+		prd.objectId = 0;
     }
 
-	void collectSamples() {
-		// collect 9 samples towards each light source
+	void collectSamples(Sampler *sampler, RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd) {
+		if (prd.objectId == -2)
+			return;
+		else if (prd.objectId == -1) {
+			ppd.color += prd.its->Le(-prd.primaryRay->d);
+			return;
+		}
+
+		
+		size_t nEmitterSamples = 9;
+
+		DirectSamplingRecord dRec;
+		dRec.ref = prd.its->p;
+		dRec.refN = prd.its->shFrame.n;
+
+		Point2 *sampleArray;
+		const Scene *scene = rRec.scene;
+		Intersection &its = rRec.its;
+
+		for (auto emitter : scene->getEmitters()) {
+			if (emitter->isOnSurface() &&
+				emitter->getShape() != NULL &&
+				emitter->getShape()->getName().compare("rectangle") == 0) {
+
+				Spectrum emitterColor(0.0f);
+				sampleArray = sampler->next2DArray(nEmitterSamples);
+
+				for (size_t i = 0; i < nEmitterSamples; i++) {
+					Spectrum value = emitter->sampleDirect(dRec, sampleArray[i]);
+					RayDifferential shadowRay(prd.its->p, dRec.d, prd.primaryRay->time);
+					bool intersect = rRec.rayIntersect(shadowRay);
 
 
-
+				}
+			}
+		}
 	}
    
 	void serialize(Stream *stream, InstanceManager *manager) const {
