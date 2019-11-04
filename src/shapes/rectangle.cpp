@@ -117,6 +117,10 @@ public:
 		return m_frame;
 	}
 
+	Float getSize() const {
+		return (m_dpdu + m_dpdv).length() / 2.0f;
+	}
+
     AABB getAABB() const {
         AABB aabb;
         aabb.expandBy(m_objectToWorld(Point(-1, -1, 0)));

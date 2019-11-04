@@ -214,6 +214,11 @@ public:
 		return Point(0, 0, 0);
 	}
 
+	virtual Float getSize() const {
+		std::cerr << "Shape::getCenter() Not implemented." << std::endl;
+		return 0;
+	}
+
 	virtual Frame getFrame() const {
 		std::cerr << "Shape::getFrame() Not implemented." << std::endl;
 		return Frame();

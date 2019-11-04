@@ -244,8 +244,12 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 	 Float *d2Min; // Use for computing adaptive sampling rates
 
 	 Float *beta; // primal filter size
+	 Float *sigma; // standard devation for each emitter, use size of emiiter / 2
 	 Spectrum *colorEmitter; // color for each emiiter
 	 Spectrum color; // color for direct hit to light source
+	 Point avgHitPoint; // avg primary ray hit point for each pixel
+	 Float omegaMaxPix;
+	 size_t numAdaptiveSamples;
 
 	 void init(size_t nEmitters) {
 		 d1 = new Float[nEmitters];
@@ -261,6 +265,9 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 			 d2Max[i] = std::numeric_limits<Float>::min();
 			 d2Min[i] = std::numeric_limits<Float>::max();
 			 colorEmitter[i] = Spectrum(0.0f);
+			 avgHitPoint = Point(0.0f);
+			 omegaMaxPix = 0.0f;
+			 numAdaptiveSamples = 0;
 		 }
 
 		 color = Spectrum(0.0f);
@@ -436,22 +443,41 @@ public:
 				sampler->advance();
 			}
 
-			for (size_t k = 0; k < emitterCenters.size(); k++)
-				ppd[pixelID].colorEmitter[k] /= (float)sampleCount;
+			for (size_t k = 0; k < emitterCenters.size(); k++) {
+				ppd[pixelID].colorEmitter[k] /= (float)sampleCount; // TODO : do the averaging afer adaptive sampling step.
+				ppd[pixelID].d1[k] /= (float)sampleCount;
+			}
 
+			ppd[pixelID].avgHitPoint /= (float)sampleCount;
 			ppd[pixelID].color /= (float)sampleCount;
 		});
 
-		std::cout << "Finished Data-collection and adaptive sampling pass." << std::endl;
+		std::cout << "Finished Data-collection pass." << std::endl;
 
-		pBufferToImage(result, ppd, cropSize, (int)emitterCenters.size());
+		runPool.run([&](int pixelID, int threadID) {
+			ThreadData &td = threadData[threadID];
+			auto sampler = td.sampler.get();
+			RadianceQueryRecord rRec(scene, sampler);
+
+			int i = pixelID % cropSize.x;
+			int j = pixelID / cropSize.x;
+			sampler->generate(Point2i(i, j));
+
+			computeOmegaMaxPix(ppd, cropSize, pixelID);
+			adaptiveSample(rRec, ppd[pixelID], emitterCenters);
+		});
+		
+		std::cout << "Finished adaptive sampling pass." << std::endl;
+
+		pBufferToImage(result, ppd, cropSize, static_cast<uint32_t>(emitterCenters.size()));
 		//gBufferToImage(result, gBuffer, cropSize, sampleCount);
         film->setBitmap(result);
 		
 		return true;
     }
 
-	 void gBufferPass(const RayDifferential &primaryRay, RadianceQueryRecord &rRec, PrimaryRayData &prd) {
+	 void gBufferPass(const RayDifferential &primaryRay, RadianceQueryRecord &rRec, PrimaryRayData &prd) 
+	 {
         Intersection &its = rRec.its;
 		RayDifferential ray(primaryRay);
         bool intersect = rRec.rayIntersect(ray);
@@ -472,16 +498,27 @@ public:
 		prd.objectId = 0;
     }
 
-	void collectSamples(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd, const std::vector<Point> &emitterCenters) {
+	Float gaussian1D(Float x, Float sigma)
+	{
+		const float sqrt_2_pi = sqrt(2.f * M_PI);
+		return exp(-(x * x) / (2.f * sigma * sigma)) / (sqrt_2_pi * sigma);
+	}
+
+	size_t nEmitterSamples = 9; //intial samples
+	Float alpha = 1.0f; // bandlimit alpha
+	Float mu = 2.0f;
+	Float  maxAdaptiveSamples = 20.0f;
+
+	void collectSamples(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd, const std::vector<Point> &emitterCenters) 
+	{
 		if (prd.objectId == -2)
 			return;
 		else if (prd.objectId == -1) {
 			ppd.color += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
-				
-		size_t nEmitterSamples = 9;
-
+		
+		ppd.avgHitPoint += prd.its->p;
 		DirectSamplingRecord dRec(*prd.its);
 		
 		const Scene *scene = rRec.scene;
@@ -493,19 +530,101 @@ public:
 				emitter->getShape() != NULL &&
 				emitter->getShape()->getName().compare("rectangle") == 0) {
 
-				// This implementation doesn't look right
-				// Read soler et. al 1998 for r(x) term
-				// read egan 11a and 11b
+				// compute Unshadowed irradiance from the center of light source
 				Spectrum unshadowedIrradiance = getUnshadowedIrradiance(emitter, emitterCenters[emitterIdx], *prd.its, prd.its->getBSDF(*prd.primaryRay));
+				
+				// compute the sum {I(y) V(y)} - here I(y) is gaussian light source
 				Float hitCount = 0;
 				for (size_t i = 0; i < nEmitterSamples; i++) {
 					Spectrum value = emitter->sampleDirect(dRec, rRec.nextSample2D());
 					RayDifferential shadowRay(prd.its->p, dRec.d, prd.primaryRay->time);
-					bool intersect = scene->rayIntersect(shadowRay, its);
-					hitCount += intersect && its.isEmitter() ? 1 : 0;
+					shadowRay.mint = Epsilon;
+					shadowRay.maxt = dRec.dist * (1 - ShadowEpsilon);
+					bool intersectObject = scene->rayIntersect(shadowRay, its); // ray blocked by occluder
+										
+					// apply gaussian falloff according to distance from center
+					hitCount +=  intersectObject ? 0 : gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
+
+					// collect distance d1, d2Max, d2Min
+					if (intersectObject && unshadowedIrradiance.average() > 0) {
+						ppd.d1[emitterIdx] += (dRec.p - prd.its->p).length();
+						Float d2 = (dRec.p - its.p).length();
+
+						if (d2 < ppd.d2Min[emitterIdx])
+							ppd.d2Min[emitterIdx] = d2;
+						if (d2 > ppd.d2Max[emitterIdx])
+							ppd.d2Max[emitterIdx] = d2;
+					}
 				}
 
-				ppd.colorEmitter[emitterIdx] += unshadowedIrradiance * Spectrum(hitCount / (Float)nEmitterSamples);
+				ppd.colorEmitter[emitterIdx] += unshadowedIrradiance * Spectrum(hitCount);
+				emitterIdx++;
+			}
+		}
+	}
+
+	void computeOmegaMaxPix(PerPixelData *ppd, const Vector2i &cropSize, int pixelID)
+	{
+		int i = pixelID % cropSize.x;
+		int j = pixelID / cropSize.x;
+	
+		const Point &hitPoint = ppd[pixelID].avgHitPoint;
+		Float d = 0.0f;
+		if (Vector(hitPoint).length() > 0) {
+			size_t pixLeft = pixelID - 1;
+			size_t pixRight = pixelID + 1;
+			size_t pixDn = (j - 1) * cropSize.x + i;
+			size_t pixUp = (j + 1) * cropSize.x + i;
+			Float ctr = 0;
+			if (i > 0 && Vector(ppd[pixLeft].avgHitPoint).length() > 0) {
+				d += Vector(ppd[pixLeft].avgHitPoint - hitPoint).length();
+				ctr += 1;
+			}
+			if (i < (cropSize.x - 1) && Vector(ppd[pixRight].avgHitPoint).length() > 0) {
+				d += Vector(ppd[pixRight].avgHitPoint - hitPoint).length();
+				ctr += 1;
+			}
+			if (j > 0 && Vector(ppd[pixDn].avgHitPoint).length() > 0) {
+				d += Vector(ppd[pixDn].avgHitPoint - hitPoint).length();
+				ctr += 1;
+			}
+			if (j < (cropSize.y - 1) && Vector(ppd[pixUp].avgHitPoint).length() > 0) {
+				d += Vector(ppd[pixUp].avgHitPoint - hitPoint).length();
+				ctr += 1;
+			}
+
+			if (ctr > 0)
+				d /= ctr;
+
+			if (d > 0)
+				ppd[pixelID].omegaMaxPix = 1.0f / d;
+		}
+	}
+
+	void adaptiveSample(RadianceQueryRecord &rRec, PerPixelData &ppd, const std::vector<Point> &emitterCenters)
+	{
+		const Scene *scene = rRec.scene;
+		
+		int emitterIdx = 0;
+		for (auto emitter : scene->getEmitters()) {
+			if (emitter->isOnSurface() &&
+				emitter->getShape() != NULL &&
+				emitter->getShape()->getName().compare("rectangle") == 0) {
+				// compute number of extra samples required i.e. adaptive sampling
+				if (ppd.d2Max[emitterIdx] > 0) {
+					const Float s1 = std::max<Float>(ppd.d1[emitterIdx] / ppd.d2Min[emitterIdx], 1.f) - 1.f;
+					Float s2 = std::max<Float>(ppd.d1[emitterIdx] / ppd.d2Max[emitterIdx], 1.f) - 1.f;
+					Float inv_s2 = alpha / (1.f + s2);
+
+					// Calculate pixel area and light area
+					const float Ap = 1.f / (ppd.omegaMaxPix *ppd.omegaMaxPix);
+					const float Al = 4.f * emitter->getShape()->getSize() * emitter->getShape()->getSize();
+
+					// Calcuate number of additional samples
+					const Float numSamples = std::min<Float>(4.f * pow(1.f + mu * (s1 / s2), 2.f) * pow(mu * 2 / s2 * sqrt(Ap / Al) + inv_s2, 2.f), maxAdaptiveSamples);
+					ppd.numAdaptiveSamples = 1;// static_cast<size_t>(numSamples);
+				}
+			
 
 				emitterIdx++;
 			}
@@ -513,7 +632,8 @@ public:
 		}
 	}
 
-	Spectrum getUnshadowedIrradiance(const Emitter *emitter, const Point &emitterHit, const Intersection &receiverIts, const BSDF *bsdf) {
+	Spectrum getUnshadowedIrradiance(const Emitter *emitter, const Point &emitterHit, const Intersection &receiverIts, const BSDF *bsdf) 
+	{
 		Vector emitterDirection = emitterHit - receiverIts.p;
 		Float r_2 = dot(emitterDirection, emitterDirection);
 		Float r = sqrt(r_2);
@@ -529,7 +649,8 @@ public:
 		return radiance * bsdf->eval(bRec) * abs(cosEmitter) / r_2;
 	}
    
-	void gBufferToImage(ref<Bitmap> &result, const PrimaryRayData *gBuffer, const Vector2i &cropSize, const size_t sampleCount) {
+	void gBufferToImage(ref<Bitmap> &result, const PrimaryRayData *gBuffer, const Vector2i &cropSize, const size_t sampleCount) 
+	{
 		int select = 1;
 
 		Spectrum *throughputPix = (Spectrum *)result->getData();
@@ -558,7 +679,8 @@ public:
 		result->scale(1.0f / sampleCount);
 	}
 
-	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize, const int nEmitters) {
+	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize, const uint32_t nEmitters) 
+	{
 		Spectrum *throughputPix = (Spectrum *)result->getData();
 		
 		for (size_t j = 0; j < cropSize.y; j++)
@@ -567,9 +689,28 @@ public:
 				const PerPixelData &pData = pBuffer[currPix];
 				throughputPix[currPix] = pData.color;
 
-				for (int k = 0; k < nEmitters; k++) {
+				for (uint32_t k = 0; k < nEmitters; k++) {
 					throughputPix[currPix] += pData.colorEmitter[k];
 				}
+				
+				// Visualize d1
+				// throughputPix[currPix] = Spectrum(pData.d1[0] / 200);
+
+				// Visualize d2Max
+				throughputPix[currPix] = Spectrum(pData.d2Max[0]);
+
+				// Visualize d2Min
+				//if (pData.d2Min[0] < std::numeric_limits<Float>::max())
+					//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 200);
+
+				// Visualize numAdaptiveSamples
+				//throughputPix[currPix] = Spectrum(pData.numAdaptiveSamples);
+				
+				// Visualize pixel footprint size
+				//if (pData.omegaMaxPix > 0)
+					//throughputPix[currPix] = Spectrum(1 / pData.omegaMaxPix);
+				//else
+					//throughputPix[currPix] = Spectrum(0.0f);
 			}
 	}
 	

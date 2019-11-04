@@ -240,6 +240,7 @@
 		</emitter>
 		-->
 	</shape>
+	<!--
 	<shape type="obj" >
 		<string name="filename" value="models/Mesh080.obj" />
 		<transform name="toWorld" >
@@ -247,6 +248,7 @@
 		</transform>
 		<ref id="Black" />
 	</shape>
+	-->
 	<shape type="obj" >
 		<string name="filename" value="models/Mesh067.obj" />
 		<transform name="toWorld" >
@@ -783,6 +785,7 @@
 			<rgb name="radiance" value="9, 9, 10"/>
 		</emitter>
 	</shape>
+	
 	<!--
 	<shape type="rectangle" >
 		<transform name="toWorld" >
