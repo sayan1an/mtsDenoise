@@ -439,6 +439,7 @@ public:
 			computeOmegaMaxPix(ppd, cropSize, pixelID);
 			adaptiveSample(rRec, gBuffer[pixelID *  sampleCount], ppd[pixelID], emitterCenters);
 			sampler->advance();
+			computeBeta(rRec, gBuffer[pixelID *  sampleCount], ppd[pixelID]);
 		});
 		
 		std::cout << "Finished adaptive sampling pass." << std::endl;
@@ -478,10 +479,12 @@ public:
 		return exp(-(x * x) / (2.f * sigma * sigma)) / (sqrt_2_pi * sigma);
 	}
 
-	size_t nEmitterSamples = 9; //intial samples
+	size_t nEmitterSamples = 4; //intial samples
 	Float alpha = 1.0f; // bandlimit alpha
 	Float mu = 2.0f;
-	Float  maxAdaptiveSamples = 20.0f;
+	Float  maxAdaptiveSamples = 100.0f;
+	Float gaussianSpreadCorrection = 3.0f;
+	Float maxFilterWidth = 5.0f;
 
 	void collectSamples(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd, const std::vector<Point> &emitterCenters) 
 	{
@@ -642,6 +645,40 @@ public:
 			ppd.colorEmitter[k] /= static_cast<Float>(ppd.totalNumShadowSample[k]);
 
 	}
+
+	void computeBeta(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd)
+	{
+		if (prd.objectId == -2)
+			return;
+		else if (prd.objectId == -1)
+			return;
+
+		const Scene *scene = rRec.scene;
+
+		int emitterIdx = 0;
+		for (auto emitter : scene->getEmitters()) {
+			if (emitter->isOnSurface() &&
+				emitter->getShape() != NULL &&
+				emitter->getShape()->getName().compare("rectangle") == 0) {
+
+				if (ppd.d2Max[emitterIdx] > 100 * std::numeric_limits<Float>::min()) {
+					// Update s2 and inv_s2
+					const Float s2 = std::max<Float>(ppd.d1[emitterIdx] / ppd.d2Max[emitterIdx], 1.f) - 1.f;
+					const Float inv_s2 = alpha / (1.f + s2);
+					const Float omegaMaxX = inv_s2 * ppd.omegaMaxPix;
+
+					const Float sigma = emitter->getShape()->getSize();
+
+					// Calculate filter width at current pixel
+					const float beta = (1.f / gaussianSpreadCorrection) * (1.f / mu) * std::max<Float>(sigma * s2, 1.f / omegaMaxX);
+					ppd.beta[emitterIdx] = std::max<Float>(std::min<Float>(beta, maxFilterWidth), 1.f);
+				}
+
+				emitterIdx++;
+			}
+		}
+	}
+
 	/*
 	Spectrum getUnshadowedIllumination(const Emitter *emitter, const Point &emitterHit, const Intersection &receiverIts, const BSDF *bsdf) 
 	{
@@ -698,11 +735,12 @@ public:
 			for (size_t i = 0; i < cropSize.x; i++) {
 				size_t currPix = j * cropSize.x + i;
 				const PerPixelData &pData = pBuffer[currPix];
-				throughputPix[currPix] = pData.color;
+				throughputPix[currPix] = Spectrum(0.0f);
+				//throughputPix[currPix] = pData.color;
 
-				for (uint32_t k = 0; k < nEmitters; k++) {
-					throughputPix[currPix] += pData.colorEmitter[k];
-				}
+				//for (uint32_t k = 0; k < nEmitters; k++) {
+					//throughputPix[currPix] += pData.colorEmitter[k];
+				//}
 				
 				// Visualize d1
 				// throughputPix[currPix] = Spectrum(pData.d1[0] / 200);
@@ -719,6 +757,12 @@ public:
 					//throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
 				//throughputPix[currPix] /= nEmitters;
 				//throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
+
+				// visualize beta
+				for (uint32_t k = 0; k < nEmitters; k++)
+					throughputPix[currPix] += Spectrum(pData.beta[k]);
+				throughputPix[currPix] /= nEmitters;
+				throughputPix[currPix] /= (maxFilterWidth);
 
 				// Visualize pixel footprint size
 				//if (pData.omegaMaxPix > 0)
