@@ -248,6 +248,8 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 	 Spectrum *colorEmitter; // color for each emiiter
 	 Spectrum color; // color for direct hit to light source
 	 Point avgHitPoint; // avg primary ray hit point for each pixel
+	 Vector avgShNormal; // Average shading normal at primary ray hit point
+
 	 Float omegaMaxPix;
 	 size_t numAdaptiveSamples;
 
@@ -280,26 +282,7 @@ public:
 	AAF(const Properties &props)
 		: Integrator(props) {
 
-        m_rrDepth = props.getInteger("rrDepth", 5);
-
-        /* Longest visualized path depth (\c -1 = infinite).
-           A value of \c 1 will visualize only directly visible light sources.
-           \c 2 will lead to single-bounce (direct-only) illumination, and so on. */
-        m_maxDepth = props.getInteger("maxDepth", -1);
-
-        /**
-         * This parameter specifies the action to be taken when the geometric
-         * and shading normals of a surface don't agree on whether a ray is on
-         * the front or back-side of a surface.
-         *
-         * When \c strictNormals is set to \c false, the shading normal has
-         * precedence, and rendering proceeds normally at the risk of
-         * introducing small light leaks (this is the default).
-         *
-         * When \c strictNormals is set to \c true, the random walk is
-         * terminated when encountering such a situation. This may
-         * lead to silhouette darkening on badly tesselated meshes.
-         */
+      
         m_strictNormals = props.getBoolean("strictNormals", false);
 
         /**
@@ -307,18 +290,6 @@ public:
          * visible emitters will not be included in the rendered image
          */
         m_hideEmitters = props.getBoolean("hideEmitters", false);
-
-        if (m_rrDepth <= 0)
-            Log(EError, "'rrDepth' must be set to a value greater than zero!");
-
-        if (m_maxDepth <= 0 && m_maxDepth != -1)
-            Log(EError, "'maxDepth' must be set to -1 (infinite) or a value greater than zero!");
-
-		m_minDepth = props.getInteger("minDepth", 0);
-		if(m_maxDepth != -1 && m_minDepth+1 >= m_maxDepth) {
-			Log(EError, "Impossible to have the good min depth");
-		}
-
 	}
 
 	/// Unserialize from a binary data stream
@@ -444,11 +415,12 @@ public:
 			}
 
 			for (size_t k = 0; k < emitterCenters.size(); k++) {
-				ppd[pixelID].colorEmitter[k] /= (float)sampleCount; // TODO : do the averaging afer adaptive sampling step.
+				ppd[pixelID].colorEmitter[k] /= (float)sampleCount;
 				ppd[pixelID].d1[k] /= (float)sampleCount;
 			}
 
 			ppd[pixelID].avgHitPoint /= (float)sampleCount;
+			ppd[pixelID].avgShNormal /= (float)sampleCount;
 			ppd[pixelID].color /= (float)sampleCount;
 		});
 
@@ -464,7 +436,8 @@ public:
 			sampler->generate(Point2i(i, j));
 
 			computeOmegaMaxPix(ppd, cropSize, pixelID);
-			adaptiveSample(rRec, ppd[pixelID], emitterCenters);
+			adaptiveSample(rRec, gBuffer[pixelID *  sampleCount], ppd[pixelID], emitterCenters);
+			//sampler->advance();
 		});
 		
 		std::cout << "Finished adaptive sampling pass." << std::endl;
@@ -504,7 +477,7 @@ public:
 		return exp(-(x * x) / (2.f * sigma * sigma)) / (sqrt_2_pi * sigma);
 	}
 
-	size_t nEmitterSamples = 9; //intial samples
+	size_t nEmitterSamples = 20; //intial samples
 	Float alpha = 1.0f; // bandlimit alpha
 	Float mu = 2.0f;
 	Float  maxAdaptiveSamples = 20.0f;
@@ -519,6 +492,7 @@ public:
 		}
 		
 		ppd.avgHitPoint += prd.its->p;
+		ppd.avgShNormal += prd.its->shFrame.n;
 		DirectSamplingRecord dRec(*prd.its);
 		
 		const Scene *scene = rRec.scene;
@@ -601,17 +575,28 @@ public:
 		}
 	}
 
-	void adaptiveSample(RadianceQueryRecord &rRec, PerPixelData &ppd, const std::vector<Point> &emitterCenters)
-	{
-		const Scene *scene = rRec.scene;
+	void adaptiveSample(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd, const std::vector<Point> &emitterCenters)
+	{	
+		if (prd.objectId == -2)
+			return;
+		else if (prd.objectId == -1)
+			return;
 		
+		const Scene *scene = rRec.scene;
+		DirectSamplingRecord dRec(*prd.its);
+		dRec.ref = ppd.avgHitPoint;
+		dRec.refN = ppd.avgShNormal;
+
+		Intersection its;
+
 		int emitterIdx = 0;
 		for (auto emitter : scene->getEmitters()) {
 			if (emitter->isOnSurface() &&
 				emitter->getShape() != NULL &&
 				emitter->getShape()->getName().compare("rectangle") == 0) {
+				
 				// compute number of extra samples required i.e. adaptive sampling
-				if (ppd.d2Max[emitterIdx] > 0) {
+				if (ppd.d2Max[emitterIdx] > 100 * std::numeric_limits<Float>::min()) {
 					const Float s1 = std::max<Float>(ppd.d1[emitterIdx] / ppd.d2Min[emitterIdx], 1.f) - 1.f;
 					Float s2 = std::max<Float>(ppd.d1[emitterIdx] / ppd.d2Max[emitterIdx], 1.f) - 1.f;
 					Float inv_s2 = alpha / (1.f + s2);
@@ -622,10 +607,29 @@ public:
 
 					// Calcuate number of additional samples
 					const Float numSamples = std::min<Float>(4.f * pow(1.f + mu * (s1 / s2), 2.f) * pow(mu * 2 / s2 * sqrt(Ap / Al) + inv_s2, 2.f), maxAdaptiveSamples);
-					ppd.numAdaptiveSamples = 1;// static_cast<size_t>(numSamples);
+					ppd.numAdaptiveSamples = static_cast<size_t>(numSamples > 0 ? numSamples : 0);
+					
+					// compute Unshadowed irradiance from the center of light source
+					Spectrum unshadowedIrradiance = getUnshadowedIrradiance(emitter, emitterCenters[emitterIdx], *prd.its, prd.its->getBSDF(*prd.primaryRay));
+
+					// compute the sum {I(y) V(y)} - here I(y) is gaussian light source
+					Float hitCount = 0;
+					for (size_t i = 0; i < ppd.numAdaptiveSamples; i++) {
+						Spectrum value = emitter->sampleDirect(dRec, rRec.nextSample2D());
+						RayDifferential shadowRay(ppd.avgHitPoint, dRec.d, prd.primaryRay->time);
+						shadowRay.mint = Epsilon;
+						shadowRay.maxt = dRec.dist * (1 - ShadowEpsilon);
+						bool intersectObject = scene->rayIntersect(shadowRay, its); // ray blocked by occluder
+
+						// apply gaussian falloff according to distance from center
+						hitCount += intersectObject ? 0 : gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
+						//std::cout << "Hola" << std::endl;
+					}
+
+					ppd.colorEmitter[emitterIdx] += unshadowedIrradiance * Spectrum(hitCount);
+					ppd.colorEmitter[emitterIdx] *= 0.5f;
 				}
 			
-
 				emitterIdx++;
 			}
 
@@ -697,14 +701,14 @@ public:
 				// throughputPix[currPix] = Spectrum(pData.d1[0] / 200);
 
 				// Visualize d2Max
-				throughputPix[currPix] = Spectrum(pData.d2Max[0]);
+				//throughputPix[currPix] = Spectrum(pData.d2Max[0]);
 
 				// Visualize d2Min
 				//if (pData.d2Min[0] < std::numeric_limits<Float>::max())
 					//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 200);
 
 				// Visualize numAdaptiveSamples
-				//throughputPix[currPix] = Spectrum(pData.numAdaptiveSamples);
+				//throughputPix[currPix] = Spectrum(pData.numAdaptiveSamples / maxAdaptiveSamples);
 				
 				// Visualize pixel footprint size
 				//if (pData.omegaMaxPix > 0)
@@ -721,8 +725,6 @@ public:
 	std::string toString() const {
 		std::ostringstream oss;
 		oss << "AAF[" << endl
-			<< "  maxDepth = " << m_maxDepth << "," << endl
-			<< "  rrDepth = " << m_rrDepth << "," << endl
 			<< "  strictNormals = " << m_strictNormals << endl
 			<< "]";
 		return oss.str();
@@ -731,10 +733,6 @@ public:
 	MTS_DECLARE_CLASS()
 
 private:
-    int m_minDepth;
-
-    int m_maxDepth;
-    int m_rrDepth;
     bool m_strictNormals;
     bool m_hideEmitters;
 
@@ -743,3 +741,7 @@ private:
 MTS_IMPLEMENT_CLASS_S(AAF, false, Integrator)
 MTS_EXPORT_PLUGIN(AAF, "AAF");
 MTS_NAMESPACE_END
+
+// Issues found
+// Since the we do not sample over the entire domain of gaussian falloff, the pdf is therefore unnormalized, hence looks brighter or darker depending on number of samples.
+// Computing the form factor only at the center results in very gross approximation.

@@ -1,10 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 
 <scene version="0.6.0" >
-	<integrator type="aaf">
-		<integer name="maxDepth" value="65" />
-		<boolean name="strictNormals" value="true" />
-	</integrator>
+	<integrator type="aaf"></integrator>
 	<sensor type="perspective" >
 		<float name="fov" value="60" />
 		<transform name="toWorld" >
