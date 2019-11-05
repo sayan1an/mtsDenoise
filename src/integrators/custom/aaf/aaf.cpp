@@ -233,6 +233,7 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
  struct PrimaryRayData {
 	Intersection *its;
 	RayDifferential *primaryRay;
+	Float depth;
     int objectId;
  };
 
@@ -247,13 +248,15 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 	 Float *beta; // primal filter size
 	 Float *sigma; // standard devation for each emitter, use size of emiiter / 2
 	 Spectrum *colorEmitter; // color for each emiiter
+	 Spectrum *colorEmitterBlur; // color for each emiiter after blurring
 	 Spectrum color; // color for direct hit to light source
 	 Point avgHitPoint; // avg primary ray hit point for each pixel
 	 Vector avgShNormal; // Average shading normal at primary ray hit point
 
 	 Float omegaMaxPix;
+	 Float depth;
 	 size_t *totalNumShadowSample;
-
+	
 	 void init(size_t nEmitters) 
 	 {
 		 d1 = new Float[nEmitters];
@@ -262,19 +265,21 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 
 		 beta = new Float[nEmitters];
 		 colorEmitter = new Spectrum[nEmitters];
+		 colorEmitterBlur = new Spectrum[nEmitters];
 		 totalNumShadowSample = new size_t[nEmitters];
-
+		
 		 for (size_t i = 0; i < nEmitters; i++) {
-			 beta[i] = 1;
+			 beta[i] = 0;
 			 d1[i] = 0;
 			 d2Max[i] = std::numeric_limits<Float>::min();
 			 d2Min[i] = std::numeric_limits<Float>::max();
 			 colorEmitter[i] = Spectrum(0.0f);
-			 avgHitPoint = Point(0.0f);
-			 omegaMaxPix = 0.0f;
+			 colorEmitterBlur[i] = Spectrum(0.0f);
 			 totalNumShadowSample[i] = 0;
 		 }
-
+		 avgHitPoint = Point(0.0f);
+		 depth = 0;
+		 omegaMaxPix = 0.0f;
 		 color = Spectrum(0.0f);
 	 }
  };
@@ -423,6 +428,7 @@ public:
 			ppd[pixelID].avgHitPoint /= (float)sampleCount;
 			ppd[pixelID].avgShNormal /= (float)sampleCount;
 			ppd[pixelID].color /= (float)sampleCount;
+			ppd[pixelID].depth /= (float)sampleCount;
 		});
 
 		std::cout << "Finished Data-collection pass." << std::endl;
@@ -440,9 +446,10 @@ public:
 			adaptiveSample(rRec, gBuffer[pixelID *  sampleCount], ppd[pixelID], emitterCenters);
 			sampler->advance();
 			computeBeta(rRec, gBuffer[pixelID *  sampleCount], ppd[pixelID]);
+			screenSpaceBlur(rRec, cropSize, pixelID, ppd);
 		});
 		
-		std::cout << "Finished adaptive sampling pass." << std::endl;
+		std::cout << "Finished adaptive sampling and blurring pass." << std::endl;
 
 		pBufferToImage(result, ppd, cropSize, static_cast<uint32_t>(emitterCenters.size()));
 		//gBufferToImage(result, gBuffer, cropSize, sampleCount);
@@ -457,7 +464,8 @@ public:
 		RayDifferential ray(primaryRay);
         bool intersect = rRec.rayIntersect(ray);
 		ray.mint = Epsilon;
-
+		
+		prd.depth = 0;
 		prd.primaryRay = new RayDifferential(primaryRay);
 		prd.its = new Intersection(rRec.its);
 		
@@ -469,7 +477,8 @@ public:
 			prd.objectId = -1;
 			return;
 		}
-		      
+		
+		prd.depth = (its.p - primaryRay.o).length();
 		prd.objectId = 0;
     }
 
@@ -484,7 +493,7 @@ public:
 	Float mu = 2.0f;
 	Float  maxAdaptiveSamples = 100.0f;
 	Float gaussianSpreadCorrection = 3.0f;
-	Float maxFilterWidth = 5.0f;
+	int maxFilterWidth = 10;
 
 	void collectSamples(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd, const std::vector<Point> &emitterCenters) 
 	{
@@ -497,6 +506,7 @@ public:
 		
 		ppd.avgHitPoint += prd.its->p;
 		ppd.avgShNormal += prd.its->shFrame.n;
+		ppd.depth += prd.depth;
 		DirectSamplingRecord dRec(*prd.its);
 		
 		const Scene *scene = rRec.scene;
@@ -547,7 +557,7 @@ public:
 	{
 		int i = pixelID % cropSize.x;
 		int j = pixelID / cropSize.x;
-	
+
 		const Point &hitPoint = ppd[pixelID].avgHitPoint;
 		Float d = 0.0f;
 		if (Vector(hitPoint).length() > 0) {
@@ -643,7 +653,6 @@ public:
 		// Normalize the colors
 		for (size_t k = 0; k < emitterCenters.size(); k++)
 			ppd.colorEmitter[k] /= static_cast<Float>(ppd.totalNumShadowSample[k]);
-
 	}
 
 	void computeBeta(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd)
@@ -671,12 +680,70 @@ public:
 
 					// Calculate filter width at current pixel
 					const float beta = (1.f / gaussianSpreadCorrection) * (1.f / mu) * std::max<Float>(sigma * s2, 1.f / omegaMaxX);
-					ppd.beta[emitterIdx] = std::max<Float>(std::min<Float>(beta, maxFilterWidth), 1.f);
+					ppd.beta[emitterIdx] = std::max<Float>(beta, std::numeric_limits<Float>::min());
 				}
 
 				emitterIdx++;
 			}
 		}
+	}
+
+	void screenSpaceBlur(RadianceQueryRecord &rRec, const Vector2i &cropSize, int pixelID, PerPixelData *ppd)
+	{	
+		const Scene *scene = rRec.scene;
+
+		int i = pixelID % cropSize.x;
+		int j = pixelID / cropSize.x;
+
+		if (ppd[pixelID].depth < 100 * std::numeric_limits<Float>::min())
+			return;
+
+		int emitterIdx = 0;
+		for (auto emitter : scene->getEmitters()) {
+			if (emitter->isOnSurface() &&
+				emitter->getShape() != NULL &&
+				emitter->getShape()->getName().compare("rectangle") == 0)  {
+
+				float beta = ppd[pixelID].beta[emitterIdx];
+
+				if (gaussian1D(0, beta) <= 1.0f) {
+					Vector3 center = emitter->getShape()->getFrame().toLocal(Vector(ppd[pixelID].avgHitPoint));
+					center.z = 0;
+					Spectrum blurEmiiterColor(0.0f);
+					Float weightNorm = 0.0f;
+					for (int x = -maxFilterWidth; x < maxFilterWidth; x++) {
+						int pixelX = i + x;
+						if (pixelX < 0 || pixelX >= cropSize.x)
+							continue;
+
+						for (int y = -maxFilterWidth; y < maxFilterWidth; y++) {
+							int pixelY = j + y;
+							if (pixelY < 0 || pixelY >= cropSize.y)
+								continue;
+
+							int neighbourID = pixelY * cropSize.x + pixelX;
+
+							if (abs(ppd[neighbourID].depth - ppd[pixelID].depth) / ppd[pixelID].depth > 0.1f)
+								continue;
+
+							Vector3 p = emitter->getShape()->getFrame().toLocal(Vector(ppd[neighbourID].avgHitPoint));
+							p.z = 0;
+
+							// Note that beta is not in pixel space, it is in the local coordinate of light source
+							const Float w = gaussian1D((p - center).length(), beta);
+							blurEmiiterColor += w * ppd[neighbourID].colorEmitter[emitterIdx];
+							weightNorm += w;
+						}
+						if (weightNorm > 100 * std::numeric_limits<Float>::min())
+							ppd[pixelID].colorEmitterBlur[emitterIdx] = blurEmiiterColor / weightNorm;
+					}
+				}
+				else
+					ppd[pixelID].colorEmitterBlur[emitterIdx] = ppd[pixelID].colorEmitter[emitterIdx];
+			}
+			emitterIdx++;
+		}
+
 	}
 
 	/*
@@ -736,11 +803,17 @@ public:
 				size_t currPix = j * cropSize.x + i;
 				const PerPixelData &pData = pBuffer[currPix];
 				throughputPix[currPix] = Spectrum(0.0f);
-				//throughputPix[currPix] = pData.color;
+				throughputPix[currPix] = pData.color;
 
+				// for unblurred results
 				//for (uint32_t k = 0; k < nEmitters; k++) {
-					//throughputPix[currPix] += pData.colorEmitter[k];
+				//	throughputPix[currPix] += pData.colorEmitter[k];
 				//}
+
+				// For blurred results
+				for (uint32_t k = 0; k < nEmitters; k++) {
+					throughputPix[currPix] += pData.colorEmitterBlur[k];
+				}
 				
 				// Visualize d1
 				// throughputPix[currPix] = Spectrum(pData.d1[0] / 200);
@@ -759,10 +832,13 @@ public:
 				//throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
 
 				// visualize beta
-				for (uint32_t k = 0; k < nEmitters; k++)
-					throughputPix[currPix] += Spectrum(pData.beta[k]);
-				throughputPix[currPix] /= nEmitters;
-				throughputPix[currPix] /= (maxFilterWidth);
+				//for (uint32_t k = 0; k < nEmitters; k++)
+					//throughputPix[currPix] += Spectrum(pData.beta[k]);
+				//throughputPix[currPix] /= nEmitters;
+				//throughputPix[currPix] /= (maxFilterWidth);
+
+				// visualize depth
+				//throughputPix[currPix] = Spectrum(pData.depth / 1000);
 
 				// Visualize pixel footprint size
 				//if (pData.omegaMaxPix > 0)
@@ -799,3 +875,4 @@ MTS_NAMESPACE_END
 // Issues found
 // Since the we do not sample over the entire domain of gaussian falloff, the pdf is therefore unnormalized, hence looks brighter or darker depending on number of samples.
 // Computing the form factor only at the center results in very gross approximation.
+// Final gaussian blur is in the space w.r.t light source, hence it is difficult to estimate how many pixels needs to be searched. However, one can use some heuristics like when the weights fall below certain threshold we should stop.
