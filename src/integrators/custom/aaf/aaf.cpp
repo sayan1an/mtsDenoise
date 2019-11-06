@@ -706,7 +706,8 @@ public:
 
 				float beta = ppd[pixelID].beta[emitterIdx];
 
-				if (gaussian1D(0, beta) <= 1.0f) {
+				if (beta > std::numeric_limits<Float>::min() && gaussian1D(0, beta) <= 1.0f) {
+					//std::cout << beta << " " << gaussian1D(0, beta) << std::endl;
 					Vector3 center = emitter->getShape()->getFrame().toLocal(Vector(ppd[pixelID].avgHitPoint));
 					center.z = 0;
 					Spectrum blurEmiiterColor(0.0f);
@@ -806,14 +807,14 @@ public:
 				throughputPix[currPix] = pData.color;
 
 				// for unblurred results
-				//for (uint32_t k = 0; k < nEmitters; k++) {
-				//	throughputPix[currPix] += pData.colorEmitter[k];
-				//}
+				for (uint32_t k = 0; k < nEmitters; k++) {
+					throughputPix[currPix] += pData.colorEmitter[k];
+				}
 
 				// For blurred results
-				for (uint32_t k = 0; k < nEmitters; k++) {
-					throughputPix[currPix] += pData.colorEmitterBlur[k];
-				}
+				//for (uint32_t k = 0; k < nEmitters; k++) {
+					//throughputPix[currPix] += pData.colorEmitterBlur[k];
+				//}
 				
 				// Visualize d1
 				// throughputPix[currPix] = Spectrum(pData.d1[0] / 200);
