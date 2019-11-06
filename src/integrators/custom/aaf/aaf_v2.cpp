@@ -284,9 +284,9 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 	 }
  };
 
-class AAF : public Integrator {
+class AAF2 : public Integrator {
 public:
-	AAF(const Properties &props)
+	AAF2(const Properties &props)
 		: Integrator(props) {
 
       
@@ -300,7 +300,7 @@ public:
 	}
 
 	/// Unserialize from a binary data stream
-	AAF(Stream *stream, InstanceManager *manager)
+	AAF2(Stream *stream, InstanceManager *manager)
 		: Integrator(stream, manager) { }
 
 	bool preprocess(const Scene *scene, RenderQueue *queue,
@@ -855,7 +855,7 @@ public:
 
 	std::string toString() const {
 		std::ostringstream oss;
-		oss << "AAF[" << endl
+		oss << "AAF2[" << endl
 			<< "  strictNormals = " << m_strictNormals << endl
 			<< "]";
 		return oss.str();
@@ -869,8 +869,8 @@ private:
 
 };
 
-MTS_IMPLEMENT_CLASS_S(AAF, false, Integrator)
-MTS_EXPORT_PLUGIN(AAF, "AAF");
+MTS_IMPLEMENT_CLASS_S(AAF2, false, Integrator)
+MTS_EXPORT_PLUGIN(AAF2, "AAF2");
 MTS_NAMESPACE_END
 
 // Issues found
