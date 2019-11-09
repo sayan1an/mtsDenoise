@@ -168,15 +168,19 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 computeAreaNormal();
 	 }
 
-	 // compute area and normal
-	 Normal computeAreaNormal(Float &area, const Point &p0, const Point &p1, const Point &p2) const
-	 {
-		Normal n = cross(p1 - p0, p2 - p0);
-		area = n.length();
-		n /= area;
-		area *= 0.5f;
-	 }
+	 Normal computeAreaNormal(Float &area, const Point &ref = Point(0.0f),
+		 const Matrix3x3 &w2l = static_cast<const Matrix3x3>([](Matrix3x3 m) // seems quite complex initialization to identity matrix.
+		{	m.setIdentity();
+			return m;
+		})) const
+	 {	
+		 const Point p0 = w2l * (vertexPositions[idx[0]] - ref);
+		 const Point p1 = w2l * (vertexPositions[idx[1]] - ref);
+		 const Point p2 = w2l * (vertexPositions[idx[2]] - ref);
 
+		 computeAreaNormal(area, p0, p1, p2);
+	 }
+		
 	 // return pdf in solid angle
 	 // sample in local space
 	 // multiply the pdf with appropriate jacobian
@@ -189,8 +193,7 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 			const Matrix3x3 &l2w = static_cast<const Matrix3x3>([](Matrix3x3 m)
 			{	m.setIdentity();
 				return m;
-			}),
-			Float l2wDet = 1.0f) const
+			})) const
 	 {	
 		 const Point p0 = w2l * (vertexPositions[idx[0]] - ref);
 		 const Point p1 = w2l * (vertexPositions[idx[1]] - ref);
@@ -201,9 +204,14 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 Vector directionLocal = p0 * (1.0f - sample1) + p1 * sample1 * sample.y +
 			 p2 * sample1 * (1.0f - sample.y);
 		 
-		 Vector directionWorld = l2w * directionWorld;
+		 Vector directionWorld = l2w * directionLocal;
 		 p = Point(directionWorld) + ref;
-
+		 
+		 if (directionLocal.z <= Epsilon)
+			 return 0.0f;
+		 
+		 directionWorld /= directionWorld.length();
+		 
 		 // compute pdf in local space
 		 Float pdfLocal = 0;
 		 {	
@@ -224,10 +232,21 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 // compute the jacobian
 		 Float jacobian = 1.0;
 		 {
-
+			 Vector w = w2l * directionWorld;
+			 Float length = w.length();
+			 jacobian = w2lDet / (length * length * length);
 		 }
 		 
-
+		 return pdfLocal * jacobian;
+	 }
+ private:
+	 // compute area and normal
+	 Normal computeAreaNormal(Float &area, const Point &p0, const Point &p1, const Point &p2) const
+	 {
+		 Normal n = cross(p1 - p0, p2 - p0);
+		 area = n.length();
+		 n /= area;
+		 area *= 0.5f;
 	 }
  };
  
@@ -240,6 +259,38 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 
 	 TriangleEmitters *triangleEmitters;
 
+	 Float sample(Point &p, Sampler *sampler, const Point &ref = Point(0.0f),
+		 const Matrix3x3 &w2l = static_cast<const Matrix3x3>([](Matrix3x3 m) // seems quite complex initialization to identity matrix.
+		 {	m.setIdentity();
+			return m;
+		 }),
+		 Float w2lDet = 1.0f,
+		 const Matrix3x3 &l2w = static_cast<const Matrix3x3>([](Matrix3x3 m)
+		 {	m.setIdentity();
+			return m;
+		 }))
+	 {
+
+		 if (triangleCount > 2) {
+			std::cerr << "More than two triangles per emitter is unsupported" << std::endl;
+			return 0.0f;
+		 }
+
+		 Float sample = sampler->next1D();
+
+		 Float area0;
+		 Float area1;
+
+		 triangleEmitters[0].computeAreaNormal(area0, ref, w2l);
+		 triangleEmitters[1].computeAreaNormal(area1, ref, w2l);
+		 
+		 area0 /= (area0 + area1);
+
+		 if (sample < area0)
+			 return area0 * triangleEmitters[0].sample(p, sampler->next2D(), ref, w2l, w2lDet, l2w);
+		 
+		 return (1 - area0) * triangleEmitters[1].sample(p, sampler->next2D(), ref, w2l, w2lDet, l2w);
+	 }
 
  };
 
