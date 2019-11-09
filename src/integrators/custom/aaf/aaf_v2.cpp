@@ -145,97 +145,104 @@ private:
 
 static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage);
 
-/*! \plugin{path}{Path tracer}
- * \order{2}
- * \parameters{
- *     \parameter{maxDepth}{\Integer}{Specifies the longest path depth
- *         in the generated output image (where \code{-1} corresponds to $\infty$).
- *	       A value of \code{1} will only render directly visible light sources.
- *	       \code{2} will lead to single-bounce (direct-only) illumination,
- *	       and so on. \default{\code{-1}}
- *	   }
- *	   \parameter{rrDepth}{\Integer}{Specifies the minimum path depth, after
- *	      which the implementation will start to use the ``russian roulette''
- *	      path termination criterion. \default{\code{5}}
- *	   }
- *     \parameter{strictNormals}{\Boolean}{Be strict about potential
- *        inconsistencies involving shading normals? See the description below
- *        for details.\default{no, i.e. \code{false}}
- *     }
- *     \parameter{hideEmitters}{\Boolean}{Hide directly visible emitters?
- *        See page~\pageref{sec:hideemitters} for details.
- *        \default{no, i.e. \code{false}}
- *     }
- * }
- *
- * This integrator implements a basic path tracer and is a \emph{good default choice}
- * when there is no strong reason to prefer another method.
- *
- * To use the path tracer appropriately, it is instructive to know roughly how
- * it works: its main operation is to trace many light paths using \emph{random walks}
- * starting from the sensor. A single random walk is shown below, which entails
- * casting a ray associated with a pixel in the output image and searching for
- * the first visible intersection. A new direction is then chosen at the intersection,
- * and the ray-casting step repeats over and over again (until one of several
- * stopping criteria applies).
- * \begin{center}
- * \includegraphics[width=.7\textwidth]{images/integrator_path_figure.pdf}
- * \end{center}
- * At every intersection, the path tracer tries to create a connection to
- * the light source in an attempt to find a \emph{complete} path along which
- * light can flow from the emitter to the sensor. This of course only works
- * when there is no occluding object between the intersection and the emitter.
- *
- * This directly translates into a category of scenes where
- * a path tracer can be expected to produce reasonable results: this is the case
- * when the emitters are easily ``accessible'' by the contents of the scene. For instance,
- * an interior scene that is lit by an area light will be considerably harder
- * to render when this area light is inside a glass enclosure (which
- * effectively counts as an occluder).
- *
- * Like the \pluginref{direct} plugin, the path tracer internally relies on multiple importance
- * sampling to combine BSDF and emitter samples. The main difference in comparison
- * to the former plugin is that it considers light paths of arbitrary length to compute
- * both direct and indirect illumination.
- *
- * For good results, combine the path tracer with one of the
- * low-discrepancy sample generators (i.e. \pluginref{ldsampler},
- * \pluginref{halton}, or \pluginref{sobol}).
- *
- * \paragraph{Strict normals:}\label{sec:strictnormals}
- * Triangle meshes often rely on interpolated shading normals
- * to suppress the inherently faceted appearance of the underlying geometry. These
- * ``fake'' normals are not without problems, however. They can lead to paradoxical
- * situations where a light ray impinges on an object from a direction that is classified as ``outside''
- * according to the shading normal, and ``inside'' according to the true geometric normal.
- *
- * The \code{strictNormals}
- * parameter specifies the intended behavior when such cases arise. The default (\code{false}, i.e. ``carry on'')
- * gives precedence to information given by the shading normal and considers such light paths to be valid.
- * This can theoretically cause light ``leaks'' through boundaries, but it is not much of a problem in practice.
- *
- * When set to \code{true}, the path tracer detects inconsistencies and ignores these paths. When objects
- * are poorly tesselated, this latter option may cause them to lose a significant amount of the incident
- * radiation (or, in other words, they will look dark).
- *
- * The bidirectional integrators in Mitsuba (\pluginref{bdpt}, \pluginref{pssmlt}, \pluginref{mlt} ...)
- * implicitly have \code{strictNormals} set to \code{true}. Hence, another use of this parameter
- * is to match renderings created by these methods.
- *
- * \remarks{
- *    \item This integrator does not handle participating media
- *    \item This integrator has poor convergence properties when rendering
- *    caustics and similar effects. In this case, \pluginref{bdpt} or
- *    one of the photon mappers may be preferable.
- * }
- */
-
- struct PrimaryRayData {
+ struct PrimaryRayData 
+ {
 	Intersection *its;
 	RayDifferential *primaryRay;
 	Float depth;
     int objectId;
  };
+
+ struct TriangleEmitters
+ {
+	 uint32_t idx[3];
+	 const Point *vertexPositions; // pointer to world positions
+	
+	 void init(const Point *vertices, uint32_t i0, uint32_t i1, uint32_t i2)
+	 {
+		 vertexPositions = vertices;
+		 idx[0] = i0;
+		 idx[1] = i1;
+		 idx[2] = i2;
+
+		 computeAreaNormal();
+	 }
+
+	 // compute area and normal
+	 Normal computeAreaNormal(Float &area, const Point &p0, const Point &p1, const Point &p2) const
+	 {
+		Normal n = cross(p1 - p0, p2 - p0);
+		area = n.length();
+		n /= area;
+		area *= 0.5f;
+	 }
+
+	 // return pdf in solid angle
+	 // sample in local space
+	 // multiply the pdf with appropriate jacobian
+	 Float sample(Point &p, Point2f &sample, const Point &ref = Point(0.0f), 
+			const Matrix3x3 &w2l = static_cast<const Matrix3x3>([](Matrix3x3 m) // seems quite complex initialization to identity matrix.
+			{	m.setIdentity();
+				return m;
+			}),
+			Float w2lDet = 1.0f,
+			const Matrix3x3 &l2w = static_cast<const Matrix3x3>([](Matrix3x3 m)
+			{	m.setIdentity();
+				return m;
+			}),
+			Float l2wDet = 1.0f) const
+	 {	
+		 const Point p0 = w2l * (vertexPositions[idx[0]] - ref);
+		 const Point p1 = w2l * (vertexPositions[idx[1]] - ref);
+		 const Point p2 = w2l * (vertexPositions[idx[2]] - ref);
+
+		 Float sample1 = sqrt(sample.x);
+	
+		 Vector directionLocal = p0 * (1.0f - sample1) + p1 * sample1 * sample.y +
+			 p2 * sample1 * (1.0f - sample.y);
+		 
+		 Vector directionWorld = l2w * directionWorld;
+		 p = Point(directionWorld) + ref;
+
+		 // compute pdf in local space
+		 Float pdfLocal = 0;
+		 {	
+			 Float area = 0;
+			 Normal nLocal = computeAreaNormal(area, p0, p1, p2);
+
+			 Float dist = directionLocal.length();
+
+			 directionLocal /= dist;
+
+			 Float cosineFactor = -dot(directionLocal, nLocal);
+			 if (cosineFactor <= Epsilon)
+				 return 0.0f;
+
+			 pdfLocal = dist * dist / (area * cosineFactor);
+		 }
+
+		 // compute the jacobian
+		 Float jacobian = 1.0;
+		 {
+
+		 }
+		 
+
+	 }
+ };
+ 
+ struct EmitterSampler
+ {
+ public:
+	 uint32_t triangleCount;
+	 uint32_t vertexCount;
+	 const Point *vertexPositions; // pointer to world positions
+
+	 TriangleEmitters *triangleEmitters;
+
+
+ };
+
 
  // Ideally one would adaptively sampling each source and run the filter in image space for each source seperately
  // One optimization would be combine similar size filters into one on per pixel basis.
@@ -315,16 +322,45 @@ public:
 
 	}
 
-	void collectEmitterParameters(Scene *scene, std::vector<Point> &emitterCenter) {
+	void collectEmitterParameters(Scene *scene, std::vector<Point> &emitterCenter)
+	{
+		auto emitters = scene->getEmitters();
+		uint32_t numEmitters = 0;
+		for (auto emitter : emitters)
+		{
+			if (!emitter->isOnSurface())
+				std::cerr << "Ignoring light sources other than area light." << std::endl;
+			else {
+				if (emitter->getShape() == NULL)
+					std::cerr << "Ignoring emitter with no shape." << std::endl;
+				else if (typeid(*(emitter->getShape())) != typeid(TriMesh))
+					std::cerr << "Ignoring emitter geometry other than TriMesh. RectMesh is possible but not yet supported." << std::endl;
+				else
+					numEmitters++;
+			}
+		}
+
+		emitterCount = numEmitters;
+		emitterSamplers = new EmitterSampler[numEmitters];
+
+		numEmitters = 0;
 		for (auto emitter : scene->getEmitters()) {
 			if (emitter->isOnSurface() &&
-				emitter->getShape() != NULL) {
-				if (emitter->getShape()->getName().compare("rectangle") == 0) {
-					Point c = emitter->getShape()->getCenter();
-					emitterCenter.push_back(c);
-				}
-				else
-					std::cerr << "AAF: Ignoring emitter geometry other than Rectangle/Parallelogram." << std::endl;
+				emitter->getShape() != NULL &&
+				typeid(*(emitter->getShape())) == typeid(TriMesh)) {
+
+				const TriMesh *triMesh = static_cast<const TriMesh *>(emitter->getShape());
+				emitterSamplers[numEmitters].vertexCount = (uint32_t)triMesh->getVertexCount();
+				emitterSamplers[numEmitters].triangleCount = (uint32_t)triMesh->getTriangleCount();
+				emitterSamplers[numEmitters].vertexPositions = triMesh->getVertexPositions();
+
+				emitterSamplers[numEmitters].triangleEmitters = new TriangleEmitters[triMesh->getTriangleCount()];
+				const Triangle *triangles = triMesh->getTriangles();
+
+				for (uint32_t i = 0; i < triMesh->getTriangleCount(); i++)
+					emitterSamplers[numEmitters].triangleEmitters[i].init(triMesh->getVertexPositions(), triangles[i].idx[0], triangles[i].idx[1], triangles[i].idx[2]);
+
+				numEmitters++;
 			}
 		}
 	}
@@ -795,6 +831,10 @@ public:
 		result->scale(1.0f / sampleCount);
 	}
 
+	Float sampleEmitter(const Point &ref, const Point &refN)
+	{
+	}
+
 	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize, const uint32_t nEmitters) 
 	{
 		Spectrum *throughputPix = (Spectrum *)result->getData();
@@ -866,7 +906,9 @@ public:
 private:
     bool m_strictNormals;
     bool m_hideEmitters;
-
+	
+	EmitterSampler *emitterSamplers;
+	uint32_t emitterCount;
 };
 
 MTS_IMPLEMENT_CLASS_S(AAF2, false, Integrator)
