@@ -207,6 +207,10 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 Vector directionWorld = l2w * directionLocal;
 		 p = Point(directionWorld) + ref;
 		 
+		 // Note that we are not doing rejection sampling
+		 // To do rejection sampling, if the triangle goes below horizon in local space, it must be clipped and the area/pdfNorm must be adjusted. Also we cannot have a sample below the horizon.
+		 // Since we are not doing rejection sampling, if a direction is below the horizon in local space, it'll evaluate to zero when computing the brdf anyway, 
+         // so we can return a zero pdf, even though it is non-zero.
 		 if (directionLocal.z <= Epsilon)
 			 return 0.0f;
 		 
@@ -285,7 +289,7 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 triangleEmitters[1].computeAreaNormal(area1, ref, w2l);
 		 
 		 area0 /= (area0 + area1);
-
+		 
 		 if (sample < area0)
 			 return area0 * triangleEmitters[0].sample(p, sampler->next2D(), ref, w2l, w2lDet, l2w);
 		 
