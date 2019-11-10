@@ -125,6 +125,10 @@ Spectrum Emitter::eval(const Intersection &its, const Vector &d) const {
     NotImplementedError("eval");
 }
 
+Spectrum Emitter::getRadiance() const {
+	NotImplementedError("getRadiance");
+}
+
 Spectrum Emitter::evalEnvironment(const RayDifferential &ray) const {
     NotImplementedError("evalEnvironment");
 }

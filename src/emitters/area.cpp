@@ -112,6 +112,10 @@ public:
         return m_shape->pdfPosition(pRec);
     }
 
+	Spectrum getRadiance() const {
+		return m_radiance;
+	}
+
     Spectrum sampleDirection(DirectionSamplingRecord &dRec,
             PositionSamplingRecord &pRec,
             const Point2 &sample, const Point2 *extra) const {

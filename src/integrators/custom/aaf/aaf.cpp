@@ -720,7 +720,7 @@ public:
 				size_t currPix = j * cropSize.x + i;
 				const PerPixelData &pData = pBuffer[currPix];
 				throughputPix[currPix] = Spectrum(0.0f);
-				throughputPix[currPix] = pData.color;
+				//throughputPix[currPix] = pData.color;
 
 				// for unblurred results
 				//for (uint32_t k = 0; k < nEmitters; k++) {
@@ -728,9 +728,9 @@ public:
 				//}
 
 				// For blurred results
-				for (uint32_t k = 0; k < nEmitters; k++) {
-					throughputPix[currPix] += pData.colorEmitterBlur[k];
-				}
+				//for (uint32_t k = 0; k < nEmitters; k++) {
+					//throughputPix[currPix] += pData.colorEmitterBlur[k];
+				//}
 				
 				// Visualize d1
 				// throughputPix[currPix] = Spectrum(pData.d1[0] / 200);
@@ -743,10 +743,10 @@ public:
 					//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 200);
 
 				// Visualize numAdaptiveSamples
-				//for (uint32_t k = 0; k < nEmitters; k++)
-					//throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
-				//throughputPix[currPix] /= nEmitters;
-				//throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
+				for (uint32_t k = 0; k < nEmitters; k++)
+					throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
+				throughputPix[currPix] /= nEmitters;
+				throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
 
 				// visualize beta
 				//for (uint32_t k = 0; k < nEmitters; k++)

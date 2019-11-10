@@ -153,6 +153,8 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
     int objectId;
  };
 
+#define GET_MAT3x3_IDENTITY ([](Matrix3x3 &m) {	m.setIdentity(); return static_cast<const Matrix3x3>(m); } (Matrix3x3(0.0f)))
+
  struct TriangleEmitters
  {
 	 uint32_t idx[3];
@@ -164,45 +166,34 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 idx[0] = i0;
 		 idx[1] = i1;
 		 idx[2] = i2;
-
-		 computeAreaNormal();
 	 }
 
 	 Normal computeAreaNormal(Float &area, const Point &ref = Point(0.0f),
-		 const Matrix3x3 &w2l = static_cast<const Matrix3x3>([](Matrix3x3 m) // seems quite complex initialization to identity matrix.
-		{	m.setIdentity();
-			return m;
-		})) const
+		 const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY) const
 	 {	
-		 const Point p0 = w2l * (vertexPositions[idx[0]] - ref);
-		 const Point p1 = w2l * (vertexPositions[idx[1]] - ref);
-		 const Point p2 = w2l * (vertexPositions[idx[2]] - ref);
+		 const Point p0 = Point(w2l * (vertexPositions[idx[0]] - ref));
+		 const Point p1 = Point(w2l * (vertexPositions[idx[1]] - ref));
+		 const Point p2 = Point(w2l * (vertexPositions[idx[2]] - ref));
 
-		 computeAreaNormal(area, p0, p1, p2);
+		 return computeAreaNormal(area, p0, p1, p2);
 	 }
 		
 	 // return pdf in solid angle
 	 // sample in local space
 	 // multiply the pdf with appropriate jacobian
 	 Float sample(Point &p, Point2f &sample, const Point &ref = Point(0.0f), 
-			const Matrix3x3 &w2l = static_cast<const Matrix3x3>([](Matrix3x3 m) // seems quite complex initialization to identity matrix.
-			{	m.setIdentity();
-				return m;
-			}),
+			const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY,
 			Float w2lDet = 1.0f,
-			const Matrix3x3 &l2w = static_cast<const Matrix3x3>([](Matrix3x3 m)
-			{	m.setIdentity();
-				return m;
-			})) const
+			const Matrix3x3 &l2w = GET_MAT3x3_IDENTITY) const
 	 {	
-		 const Point p0 = w2l * (vertexPositions[idx[0]] - ref);
-		 const Point p1 = w2l * (vertexPositions[idx[1]] - ref);
-		 const Point p2 = w2l * (vertexPositions[idx[2]] - ref);
+		 const Point p0 = Point(w2l * (vertexPositions[idx[0]] - ref));
+		 const Point p1 = Point(w2l * (vertexPositions[idx[1]] - ref));
+		 const Point p2 = Point(w2l * (vertexPositions[idx[2]] - ref));
 
 		 Float sample1 = sqrt(sample.x);
 	
-		 Vector directionLocal = p0 * (1.0f - sample1) + p1 * sample1 * sample.y +
-			 p2 * sample1 * (1.0f - sample.y);
+		 Vector directionLocal = Vector(p0 * (1.0f - sample1) + p1 * sample1 * sample.y +
+			 p2 * sample1 * (1.0f - sample.y));
 		 
 		 Vector directionWorld = l2w * directionLocal;
 		 p = Point(directionWorld) + ref;
@@ -251,6 +242,8 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 area = n.length();
 		 n /= area;
 		 area *= 0.5f;
+
+		 return n;
 	 }
  };
  
@@ -260,28 +253,40 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 	 uint32_t triangleCount;
 	 uint32_t vertexCount;
 	 const Point *vertexPositions; // pointer to world positions
+	 Spectrum radiance;
 
 	 TriangleEmitters *triangleEmitters;
 
+	 Point getCenter(const Point &ref = Point(0.0f), const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY)
+	 {	
+		 Point center(0.0f);
+		 for (uint32_t i = 0; i < vertexCount; i++)
+			 center += Point(w2l * (vertexPositions[i] - ref));
+
+		 center /= static_cast<Float>(vertexCount);
+
+		 return center;
+	 }
+
+	 Float getSize(const Point &ref = Point(0.0f), const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY)
+	 {
+		 Point center = getCenter(ref, w2l);
+		 return (center - vertexPositions[0]).length();
+	 }
+
 	 Float sample(Point &p, Sampler *sampler, const Point &ref = Point(0.0f),
-		 const Matrix3x3 &w2l = static_cast<const Matrix3x3>([](Matrix3x3 m) // seems quite complex initialization to identity matrix.
-		 {	m.setIdentity();
-			return m;
-		 }),
+		 const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY,
 		 Float w2lDet = 1.0f,
-		 const Matrix3x3 &l2w = static_cast<const Matrix3x3>([](Matrix3x3 m)
-		 {	m.setIdentity();
-			return m;
-		 }))
+		 const Matrix3x3 &l2w = GET_MAT3x3_IDENTITY)
 	 {
 
 		 if (triangleCount > 2) {
 			std::cerr << "More than two triangles per emitter is unsupported" << std::endl;
 			return 0.0f;
 		 }
-
+		
 		 Float sample = sampler->next1D();
-
+		
 		 Float area0;
 		 Float area1;
 
@@ -295,7 +300,6 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 
 		 return (1 - area0) * triangleEmitters[1].sample(p, sampler->next2D(), ref, w2l, w2lDet, l2w);
 	 }
-
  };
 
 
@@ -377,7 +381,7 @@ public:
 
 	}
 
-	void collectEmitterParameters(Scene *scene, std::vector<Point> &emitterCenter)
+	void collectEmitterParameters(Scene *scene)
 	{
 		auto emitters = scene->getEmitters();
 		uint32_t numEmitters = 0;
@@ -414,7 +418,8 @@ public:
 
 				for (uint32_t i = 0; i < triMesh->getTriangleCount(); i++)
 					emitterSamplers[numEmitters].triangleEmitters[i].init(triMesh->getVertexPositions(), triangles[i].idx[0], triangles[i].idx[1], triangles[i].idx[2]);
-
+				
+				emitterSamplers[numEmitters].radiance = emitter->getRadiance();
 				numEmitters++;
 			}
 		}
@@ -439,11 +444,10 @@ public:
 
 		// global buffer
 		PrimaryRayData *gBuffer = new PrimaryRayData[cropSize.x * cropSize.y * sampleCount];
-		std::vector<Point> emitterCenters;
 		PerPixelData *ppd = new PerPixelData[cropSize.x * cropSize.y];
 
-		collectEmitterParameters(scene, emitterCenters);
-				
+		collectEmitterParameters(scene);
+	
         // Results for saving the computation
         ref<Bitmap> result = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, cropSize);
         result->clear();
@@ -493,7 +497,7 @@ public:
                 sampler->advance();
             }
 
-			ppd[pixelID].init(emitterCenters.size());
+			ppd[pixelID].init(emitterCount);
         });
 
 		std::cout << "Finished GBuffer pass." << std::endl;
@@ -508,11 +512,11 @@ public:
 			sampler->generate(Point2i(i, j));
 
 			for (size_t k = 0; k < sampleCount; k++) {
-				collectSamples(rRec, gBuffer[pixelID *  sampleCount + k], ppd[pixelID], emitterCenters);
+				collectSamples(rRec, gBuffer[pixelID *  sampleCount + k], ppd[pixelID]);
 				sampler->advance();
 			}
 
-			for (size_t k = 0; k < emitterCenters.size(); k++) {
+			for (size_t k = 0; k < emitterCount; k++) {
 				ppd[pixelID].d1[k] /= (float)sampleCount;
 			}
 
@@ -534,7 +538,7 @@ public:
 			sampler->generate(Point2i(i, j));
 
 			computeOmegaMaxPix(ppd, cropSize, pixelID);
-			adaptiveSample(rRec, gBuffer[pixelID *  sampleCount], ppd[pixelID], emitterCenters);
+			adaptiveSample(rRec, gBuffer[pixelID *  sampleCount], ppd[pixelID]);
 			sampler->advance();
 			computeBeta(rRec, gBuffer[pixelID *  sampleCount], ppd[pixelID]);
 			screenSpaceBlur(rRec, cropSize, pixelID, ppd);
@@ -542,7 +546,7 @@ public:
 		
 		std::cout << "Finished adaptive sampling and blurring pass." << std::endl;
 
-		pBufferToImage(result, ppd, cropSize, static_cast<uint32_t>(emitterCenters.size()));
+		pBufferToImage(result, ppd, cropSize, emitterCount);
 		//gBufferToImage(result, gBuffer, cropSize, sampleCount);
         film->setBitmap(result);
 		
@@ -586,7 +590,7 @@ public:
 	Float gaussianSpreadCorrection = 3.0f;
 	int maxFilterWidth = 10;
 
-	void collectSamples(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd, const std::vector<Point> &emitterCenters) 
+	void collectSamples(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd) 
 	{
 		if (prd.objectId == -2)
 			return;
@@ -598,37 +602,39 @@ public:
 		ppd.avgHitPoint += prd.its->p;
 		ppd.avgShNormal += prd.its->shFrame.n;
 		ppd.depth += prd.depth;
-		DirectSamplingRecord dRec(*prd.its);
-		
+				
 		const Scene *scene = rRec.scene;
 		Intersection its;
 		
-		int emitterIdx = 0;
-		for (auto emitter : scene->getEmitters()) {
-			if (emitter->isOnSurface() &&
-				emitter->getShape() != NULL &&
-				emitter->getShape()->getName().compare("rectangle") == 0) {
-								
+		for (uint32_t emitterIdx = 0; emitterIdx < emitterCount; emitterIdx++) {
 				// compute the sum {I(y) V(y)} - here I(y) is gaussian light source
 				Spectrum hitCount(0.0f);
 				for (size_t i = 0; i < nEmitterSamples; i++) {
-					Spectrum value = emitter->sampleDirect(dRec, rRec.nextSample2D());
-					RayDifferential shadowRay(prd.its->p, dRec.d, prd.primaryRay->time);
+					Point pointOnEmitter;
+					Float emitterPdf = emitterSamplers[emitterIdx].sample(pointOnEmitter, rRec.sampler);
+					Vector emitterDirection = pointOnEmitter - prd.its->p;
+					Float distanceToSource = emitterDirection.length();
+					emitterDirection /= distanceToSource;
+					if (emitterPdf < Epsilon || dot(emitterDirection, prd.its->shFrame.n) < Epsilon)
+						continue;
+					Spectrum value = emitterSamplers[emitterIdx].radiance / emitterPdf;
+
+					RayDifferential shadowRay(prd.its->p, emitterDirection, prd.primaryRay->time);
 					shadowRay.mint = Epsilon;
-					shadowRay.maxt = dRec.dist * (1 - ShadowEpsilon);
+					shadowRay.maxt = distanceToSource * (1 - ShadowEpsilon);
 					bool intersectObject = scene->rayIntersect(shadowRay, its); // ray blocked by occluder
 					
-					BSDFSamplingRecord bRec(*prd.its, (*prd.its).toLocal(dRec.d));
+					BSDFSamplingRecord bRec(*prd.its, (*prd.its).toLocal(emitterDirection));
 					/* Evaluate BSDF * cos(theta) */
 					const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 					// apply gaussian falloff according to distance from center
-					hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize())); // bsdfVal * value;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
+					hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - pointOnEmitter).length(), emitterSamplers[emitterIdx].getSize())); // bsdfVal * value;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
 					
 					// collect distance d1, d2Max, d2Min
 					if (intersectObject && value.average() > 0) {
-						ppd.d1[emitterIdx] += (dRec.p - prd.its->p).length();
-						Float d2 = (dRec.p - its.p).length();
+						ppd.d1[emitterIdx] += (pointOnEmitter - prd.its->p).length();
+						Float d2 = (pointOnEmitter - its.p).length();
 
 						if (d2 < ppd.d2Min[emitterIdx])
 							ppd.d2Min[emitterIdx] = d2;
@@ -639,8 +645,6 @@ public:
 
 				ppd.totalNumShadowSample[emitterIdx] += nEmitterSamples;
 				ppd.colorEmitter[emitterIdx] += hitCount;
-				emitterIdx++;
-			}
 		}
 	}
 
@@ -682,7 +686,7 @@ public:
 		}
 	}
 
-	void adaptiveSample(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd, const std::vector<Point> &emitterCenters)
+	void adaptiveSample(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd)
 	{	
 		if (prd.objectId == -2)
 			return;
@@ -690,18 +694,9 @@ public:
 			return;
 		
 		const Scene *scene = rRec.scene;
-		DirectSamplingRecord dRec(*prd.its);
-		dRec.ref = ppd.avgHitPoint;
-		dRec.refN = ppd.avgShNormal;
-
 		Intersection its;
 
-		int emitterIdx = 0;
-		for (auto emitter : scene->getEmitters()) {
-			if (emitter->isOnSurface() &&
-				emitter->getShape() != NULL &&
-				emitter->getShape()->getName().compare("rectangle") == 0) {
-				
+		for (uint32_t emitterIdx = 0; emitterIdx < emitterCount; emitterIdx++) {
 				// compute number of extra samples required i.e. adaptive sampling
 				if (ppd.d2Max[emitterIdx] > 100 * std::numeric_limits<Float>::min()) {
 					const Float s1 = std::max<Float>(ppd.d1[emitterIdx] / ppd.d2Min[emitterIdx], 1.f) - 1.f;
@@ -710,7 +705,8 @@ public:
 
 					// Calculate pixel area and light area
 					const float Ap = 1.f / (ppd.omegaMaxPix *ppd.omegaMaxPix);
-					const float Al = 4.f * emitter->getShape()->getSize() * emitter->getShape()->getSize();
+					const float sigma = emitterSamplers[emitterIdx].getSize();
+					const float Al = 4.f * sigma * sigma;
 
 					// Calcuate number of additional samples
 					const Float numSamples = std::min<Float>(4.f * pow(1.f + mu * (s1 / s2), 2.f) * pow(mu * 2 / s2 * sqrt(Ap / Al) + inv_s2, 2.f), maxAdaptiveSamples);
@@ -719,7 +715,7 @@ public:
 					
 					// compute the sum {I(y) V(y)} - here I(y) is gaussian light source
 					Spectrum hitCount(0.0f);
-					for (size_t i = 0; i < numAdaptiveSample; i++) {
+					/*for (size_t i = 0; i < numAdaptiveSample; i++) {
 						Spectrum value = emitter->sampleDirect(dRec, rRec.nextSample2D());
 						RayDifferential shadowRay(ppd.avgHitPoint, dRec.d, prd.primaryRay->time);
 						shadowRay.mint = Epsilon;
@@ -727,22 +723,19 @@ public:
 						bool intersectObject = scene->rayIntersect(shadowRay, its); // ray blocked by occluder
 
 						BSDFSamplingRecord bRec(*prd.its, (*prd.its).toLocal(dRec.d));
-						/* Evaluate BSDF * cos(theta) */
+						// Evaluate BSDF * cos(theta) 
 						const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 						// apply gaussian falloff according to distance from center
 						hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize())); //value * bsdfVal;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
 					}
 
-					ppd.colorEmitter[emitterIdx] += hitCount;
+					ppd.colorEmitter[emitterIdx] += hitCount;*/
 				}
-				
-				emitterIdx++;
-			}
 		}
 	
 		// Normalize the colors
-		for (size_t k = 0; k < emitterCenters.size(); k++)
+		for (size_t k = 0; k < emitterCount; k++)
 			ppd.colorEmitter[k] /= static_cast<Float>(ppd.totalNumShadowSample[k]);
 	}
 
@@ -886,10 +879,6 @@ public:
 		result->scale(1.0f / sampleCount);
 	}
 
-	Float sampleEmitter(const Point &ref, const Point &refN)
-	{
-	}
-
 	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize, const uint32_t nEmitters) 
 	{
 		Spectrum *throughputPix = (Spectrum *)result->getData();
@@ -899,7 +888,7 @@ public:
 				size_t currPix = j * cropSize.x + i;
 				const PerPixelData &pData = pBuffer[currPix];
 				throughputPix[currPix] = Spectrum(0.0f);
-				throughputPix[currPix] = pData.color;
+				//throughputPix[currPix] = pData.color;
 
 				// for unblurred results
 				//for (uint32_t k = 0; k < nEmitters; k++) {
@@ -907,9 +896,9 @@ public:
 				//}
 
 				// For blurred results
-				for (uint32_t k = 0; k < nEmitters; k++) {
-					throughputPix[currPix] += pData.colorEmitterBlur[k];
-				}
+				//for (uint32_t k = 0; k < nEmitters; k++) {
+					//throughputPix[currPix] += pData.colorEmitterBlur[k];
+				//}
 				
 				// Visualize d1
 				// throughputPix[currPix] = Spectrum(pData.d1[0] / 200);
@@ -922,10 +911,10 @@ public:
 					//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 200);
 
 				// Visualize numAdaptiveSamples
-				//for (uint32_t k = 0; k < nEmitters; k++)
-					//throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
-				//throughputPix[currPix] /= nEmitters;
-				//throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
+				for (uint32_t k = 1; k < emitterCount; k++)
+					throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
+				throughputPix[currPix] /= nEmitters;
+				throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
 
 				// visualize beta
 				//for (uint32_t k = 0; k < nEmitters; k++)
