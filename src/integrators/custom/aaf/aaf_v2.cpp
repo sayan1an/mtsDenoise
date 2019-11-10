@@ -201,9 +201,9 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 // Note that we are not doing rejection sampling
 		 // To do rejection sampling, if the triangle goes below horizon in local space, it must be clipped and the area/pdfNorm must be adjusted. Also we cannot have a sample below the horizon.
 		 // Since we are not doing rejection sampling, if a direction is below the horizon in local space, it'll evaluate to zero when computing the brdf anyway, 
-         // so we can return a zero pdf, even though it is non-zero.
-		 if (directionLocal.z <= Epsilon)
-			 return 0.0f;
+         // so we can return a zero pdf, even though the pdf is non-zero.
+		 //if (directionLocal.z <= Epsilon)
+			 //return 0.0f;
 		 
 		 directionWorld /= directionWorld.length();
 		 
@@ -279,9 +279,8 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 Float w2lDet = 1.0f,
 		 const Matrix3x3 &l2w = GET_MAT3x3_IDENTITY)
 	 {
-
-		 if (triangleCount > 2) {
-			std::cerr << "More than two triangles per emitter is unsupported" << std::endl;
+		 if (triangleCount != 2) {
+			std::cerr << "Only supprts exactly two triangles" << std::endl;
 			return 0.0f;
 		 }
 		
@@ -292,7 +291,7 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 
 		 triangleEmitters[0].computeAreaNormal(area0, ref, w2l);
 		 triangleEmitters[1].computeAreaNormal(area1, ref, w2l);
-		 
+		
 		 area0 /= (area0 + area1);
 		 
 		 if (sample < area0)
@@ -433,7 +432,7 @@ public:
         ref<Sensor> sensor = static_cast<Sensor *>(sched->getResource(sensorResID));
         ref<Film> film = sensor->getFilm();
         auto cropSize = film->getCropSize();
-		size_t nCores = sched->getCoreCount();
+		size_t nCores = 1;// sched->getCoreCount();
         Sampler *sampler_main = static_cast<Sampler *>(sched->getResource(samplerResID, 0));
         size_t sampleCount = sampler_main->getSampleCount();
 
@@ -642,7 +641,7 @@ public:
 							ppd.d2Max[emitterIdx] = d2;
 					}
 				}
-
+								
 				ppd.totalNumShadowSample[emitterIdx] += nEmitterSamples;
 				ppd.colorEmitter[emitterIdx] += hitCount;
 		}
@@ -695,7 +694,6 @@ public:
 		
 		const Scene *scene = rRec.scene;
 		Intersection its;
-
 		for (uint32_t emitterIdx = 0; emitterIdx < emitterCount; emitterIdx++) {
 				// compute number of extra samples required i.e. adaptive sampling
 				if (ppd.d2Max[emitterIdx] > 100 * std::numeric_limits<Float>::min()) {
@@ -911,7 +909,7 @@ public:
 					//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 200);
 
 				// Visualize numAdaptiveSamples
-				for (uint32_t k = 1; k < emitterCount; k++)
+				for (uint32_t k = 0; k < emitterCount; k++)
 					throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
 				throughputPix[currPix] /= nEmitters;
 				throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
