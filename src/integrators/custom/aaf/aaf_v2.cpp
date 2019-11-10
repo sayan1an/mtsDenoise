@@ -589,6 +589,18 @@ public:
 	Float gaussianSpreadCorrection = 3.0f;
 	int maxFilterWidth = 10;
 
+	Spectrum sampleDirect(uint32_t emitterIdx, DirectSamplingRecord &dRec, Sampler *sampler)
+	{
+		Float emitterPdf = emitterSamplers[emitterIdx].sample(dRec.p, sampler);
+		dRec.d = dRec.p - dRec.ref;
+		dRec.dist = dRec.d.length();
+		dRec.d /= dRec.dist;
+		if (emitterPdf < Epsilon || dot(dRec.d, dRec.refN) < Epsilon)
+			return Spectrum(0.0f);
+
+		return emitterSamplers[emitterIdx].radiance / emitterPdf;
+	}
+
 	void collectSamples(RadianceQueryRecord &rRec, const PrimaryRayData &prd, PerPixelData &ppd) 
 	{
 		if (prd.objectId == -2)
@@ -603,37 +615,30 @@ public:
 		ppd.depth += prd.depth;
 				
 		const Scene *scene = rRec.scene;
+		DirectSamplingRecord dRec(*prd.its);
 		Intersection its;
 		
 		for (uint32_t emitterIdx = 0; emitterIdx < emitterCount; emitterIdx++) {
 				// compute the sum {I(y) V(y)} - here I(y) is gaussian light source
 				Spectrum hitCount(0.0f);
 				for (size_t i = 0; i < nEmitterSamples; i++) {
-					Point pointOnEmitter;
-					Float emitterPdf = emitterSamplers[emitterIdx].sample(pointOnEmitter, rRec.sampler);
-					Vector emitterDirection = pointOnEmitter - prd.its->p;
-					Float distanceToSource = emitterDirection.length();
-					emitterDirection /= distanceToSource;
-					if (emitterPdf < Epsilon || dot(emitterDirection, prd.its->shFrame.n) < Epsilon)
-						continue;
-					Spectrum value = emitterSamplers[emitterIdx].radiance / emitterPdf;
-
-					RayDifferential shadowRay(prd.its->p, emitterDirection, prd.primaryRay->time);
+					Spectrum value = sampleDirect(emitterIdx, dRec, rRec.sampler);
+					RayDifferential shadowRay(prd.its->p, dRec.d, prd.primaryRay->time);
 					shadowRay.mint = Epsilon;
-					shadowRay.maxt = distanceToSource * (1 - ShadowEpsilon);
+					shadowRay.maxt = dRec.dist * (1 - ShadowEpsilon);
 					bool intersectObject = scene->rayIntersect(shadowRay, its); // ray blocked by occluder
 					
-					BSDFSamplingRecord bRec(*prd.its, (*prd.its).toLocal(emitterDirection));
+					BSDFSamplingRecord bRec(*prd.its, (*prd.its).toLocal(dRec.d));
 					/* Evaluate BSDF * cos(theta) */
 					const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 					// apply gaussian falloff according to distance from center
-					hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - pointOnEmitter).length(), emitterSamplers[emitterIdx].getSize())); // bsdfVal * value;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
+					hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - dRec.p).length(), emitterSamplers[emitterIdx].getSize())); // bsdfVal * value;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
 					
 					// collect distance d1, d2Max, d2Min
 					if (intersectObject && value.average() > 0) {
-						ppd.d1[emitterIdx] += (pointOnEmitter - prd.its->p).length();
-						Float d2 = (pointOnEmitter - its.p).length();
+						ppd.d1[emitterIdx] += (dRec.p - prd.its->p).length();
+						Float d2 = (dRec.p - its.p).length();
 
 						if (d2 < ppd.d2Min[emitterIdx])
 							ppd.d2Min[emitterIdx] = d2;
@@ -693,7 +698,12 @@ public:
 			return;
 		
 		const Scene *scene = rRec.scene;
+		DirectSamplingRecord dRec(*prd.its);
+		dRec.ref = ppd.avgHitPoint;
+		dRec.refN = ppd.avgShNormal;
+
 		Intersection its;
+		
 		for (uint32_t emitterIdx = 0; emitterIdx < emitterCount; emitterIdx++) {
 				// compute number of extra samples required i.e. adaptive sampling
 				if (ppd.d2Max[emitterIdx] > 100 * std::numeric_limits<Float>::min()) {
@@ -713,8 +723,8 @@ public:
 					
 					// compute the sum {I(y) V(y)} - here I(y) is gaussian light source
 					Spectrum hitCount(0.0f);
-					/*for (size_t i = 0; i < numAdaptiveSample; i++) {
-						Spectrum value = emitter->sampleDirect(dRec, rRec.nextSample2D());
+					for (size_t i = 0; i < numAdaptiveSample; i++) {
+						Spectrum value = sampleDirect(emitterIdx, dRec, rRec.sampler);
 						RayDifferential shadowRay(ppd.avgHitPoint, dRec.d, prd.primaryRay->time);
 						shadowRay.mint = Epsilon;
 						shadowRay.maxt = dRec.dist * (1 - ShadowEpsilon);
@@ -725,10 +735,10 @@ public:
 						const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 						// apply gaussian falloff according to distance from center
-						hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize())); //value * bsdfVal;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
+						hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - dRec.p).length(), emitterSamplers[emitterIdx].getSize())); //value * bsdfVal;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
 					}
 
-					ppd.colorEmitter[emitterIdx] += hitCount;*/
+					ppd.colorEmitter[emitterIdx] += hitCount;
 				}
 		}
 	
