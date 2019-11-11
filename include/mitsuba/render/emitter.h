@@ -481,6 +481,9 @@ public:
      */
     virtual Spectrum eval(const Intersection &its, const Vector &d) const;
 
+	/* Added by Sayantan Datta.*/
+	virtual Spectrum getRadiance() const;
+
     /**
      * \brief Importance sample a ray according to the emission profile
      *

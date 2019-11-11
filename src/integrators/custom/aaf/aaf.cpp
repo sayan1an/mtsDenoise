@@ -448,7 +448,7 @@ public:
 					const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 					// apply gaussian falloff according to distance from center
-					hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize())); // bsdfVal * value;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
+					hitCount += intersectObject ? Spectrum(0.0f) : bsdfVal * value; //  Spectrum(gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize()));
 					
 					// collect distance d1, d2Max, d2Min
 					if (intersectObject && value.average() > 0) {
@@ -556,7 +556,7 @@ public:
 						const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 						// apply gaussian falloff according to distance from center
-						hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize())); //value * bsdfVal;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
+						hitCount += intersectObject ? Spectrum(0.0f) :  value * bsdfVal; //Spectrum(gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize()));
 					}
 
 					ppd.colorEmitter[emitterIdx] += hitCount;
@@ -720,12 +720,12 @@ public:
 				size_t currPix = j * cropSize.x + i;
 				const PerPixelData &pData = pBuffer[currPix];
 				throughputPix[currPix] = Spectrum(0.0f);
-				//throughputPix[currPix] = pData.color;
+				throughputPix[currPix] = pData.color;
 
 				// for unblurred results
-				//for (uint32_t k = 0; k < nEmitters; k++) {
-					//throughputPix[currPix] += pData.colorEmitter[k];
-				//}
+				for (uint32_t k = 0; k < nEmitters; k++) {
+					throughputPix[currPix] += pData.colorEmitter[k];
+				}
 
 				// For blurred results
 				//for (uint32_t k = 0; k < nEmitters; k++) {
@@ -743,10 +743,10 @@ public:
 					//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 200);
 
 				// Visualize numAdaptiveSamples
-				for (uint32_t k = 0; k < nEmitters; k++)
-					throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
-				throughputPix[currPix] /= nEmitters;
-				throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
+				//for (uint32_t k = 0; k < nEmitters; k++)
+					//throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
+				//throughputPix[currPix] /= nEmitters;
+				//throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
 
 				// visualize beta
 				//for (uint32_t k = 0; k < nEmitters; k++)

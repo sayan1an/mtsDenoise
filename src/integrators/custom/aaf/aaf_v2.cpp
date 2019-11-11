@@ -168,12 +168,11 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 idx[2] = i2;
 	 }
 
-	 Normal computeAreaNormal(Float &area, const Point &ref = Point(0.0f),
-		 const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY) const
+	 Normal computeAreaNormal(Float &area, const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY) const
 	 {	
-		 const Point p0 = Point(w2l * (vertexPositions[idx[0]] - ref));
-		 const Point p1 = Point(w2l * (vertexPositions[idx[1]] - ref));
-		 const Point p2 = Point(w2l * (vertexPositions[idx[2]] - ref));
+		 const Point p0 = Point(w2l * Vector(vertexPositions[idx[0]]));
+		 const Point p1 = Point(w2l * Vector(vertexPositions[idx[1]]));
+		 const Point p2 = Point(w2l * Vector(vertexPositions[idx[2]]));
 
 		 return computeAreaNormal(area, p0, p1, p2);
 	 }
@@ -257,24 +256,23 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 
 	 TriangleEmitters *triangleEmitters;
 
-	 Point getCenter(const Point &ref = Point(0.0f), const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY)
+	 Float getDistanceFromCenter(const Point &ref, const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY)
 	 {	
-		 Point center(0.0f);
+		 Vector center(0.0f);
 		 for (uint32_t i = 0; i < vertexCount; i++)
-			 center += Point(w2l * (vertexPositions[i] - ref));
+			 center += w2l * (vertexPositions[i] - ref);
 
 		 center /= static_cast<Float>(vertexCount);
 
-		 return center;
+		 return center.length();
 	 }
 
-	 Float getSize(const Point &ref = Point(0.0f), const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY)
+	 Float getSize(const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY)
 	 {
-		 Point center = getCenter(ref, w2l);
-		 return (center - vertexPositions[0]).length();
+		 return getDistanceFromCenter(vertexPositions[0], w2l);
 	 }
 
-	 Float sample(Point &p, Sampler *sampler, const Point &ref = Point(0.0f),
+	 Float sample(Point &p, Sampler *sampler, const Point &ref,
 		 const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY,
 		 Float w2lDet = 1.0f,
 		 const Matrix3x3 &l2w = GET_MAT3x3_IDENTITY)
@@ -289,12 +287,12 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 Float area0;
 		 Float area1;
 
-		 triangleEmitters[0].computeAreaNormal(area0, ref, w2l);
-		 triangleEmitters[1].computeAreaNormal(area1, ref, w2l);
+		 triangleEmitters[0].computeAreaNormal(area0, w2l);
+		 triangleEmitters[1].computeAreaNormal(area1, w2l);
 		
 		 area0 /= (area0 + area1);
 		 
-		 if (sample < area0)
+		 if (sample <= area0)
 			 return area0 * triangleEmitters[0].sample(p, sampler->next2D(), ref, w2l, w2lDet, l2w);
 		 
 		 return (1 - area0) * triangleEmitters[1].sample(p, sampler->next2D(), ref, w2l, w2lDet, l2w);
@@ -591,11 +589,11 @@ public:
 
 	Spectrum sampleDirect(uint32_t emitterIdx, DirectSamplingRecord &dRec, Sampler *sampler)
 	{
-		Float emitterPdf = emitterSamplers[emitterIdx].sample(dRec.p, sampler);
+		Float emitterPdf = emitterSamplers[emitterIdx].sample(dRec.p, sampler, dRec.ref);
 		dRec.d = dRec.p - dRec.ref;
 		dRec.dist = dRec.d.length();
 		dRec.d /= dRec.dist;
-		if (emitterPdf < Epsilon || dot(dRec.d, dRec.refN) < Epsilon)
+		if (emitterPdf <= Epsilon || dot(dRec.d, dRec.refN) <= Epsilon)
 			return Spectrum(0.0f);
 
 		return emitterSamplers[emitterIdx].radiance / emitterPdf;
@@ -633,7 +631,7 @@ public:
 					const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 					// apply gaussian falloff according to distance from center
-					hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - dRec.p).length(), emitterSamplers[emitterIdx].getSize())); // bsdfVal * value;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
+					hitCount += intersectObject ? Spectrum(0.0f) :  bsdfVal * value; // Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - dRec.p).length(), emitterSamplers[emitterIdx].getSize()));
 					
 					// collect distance d1, d2Max, d2Min
 					if (intersectObject && value.average() > 0) {
@@ -735,7 +733,7 @@ public:
 						const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 						// apply gaussian falloff according to distance from center
-						hitCount += intersectObject ? Spectrum(0.0f) : Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - dRec.p).length(), emitterSamplers[emitterIdx].getSize())); //value * bsdfVal;// gaussian1D((emitterCenters[emitterIdx] - dRec.p).length(), emitter->getShape()->getSize());
+						hitCount += intersectObject ? Spectrum(0.0f) : value * bsdfVal; // Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - dRec.p).length(), emitterSamplers[emitterIdx].getSize()));
 					}
 
 					ppd.colorEmitter[emitterIdx] += hitCount;
@@ -896,12 +894,12 @@ public:
 				size_t currPix = j * cropSize.x + i;
 				const PerPixelData &pData = pBuffer[currPix];
 				throughputPix[currPix] = Spectrum(0.0f);
-				//throughputPix[currPix] = pData.color;
+				throughputPix[currPix] = pData.color;
 
 				// for unblurred results
-				//for (uint32_t k = 0; k < nEmitters; k++) {
-					//throughputPix[currPix] += pData.colorEmitter[k];
-				//}
+				for (uint32_t k = 0; k < nEmitters; k++) {
+					throughputPix[currPix] += pData.colorEmitter[k];
+				}
 
 				// For blurred results
 				//for (uint32_t k = 0; k < nEmitters; k++) {
@@ -919,10 +917,10 @@ public:
 					//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 200);
 
 				// Visualize numAdaptiveSamples
-				for (uint32_t k = 0; k < emitterCount; k++)
-					throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
-				throughputPix[currPix] /= nEmitters;
-				throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
+				//for (uint32_t k = 0; k < emitterCount; k++)
+					//throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
+				//throughputPix[currPix] /= nEmitters;
+				//throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
 
 				// visualize beta
 				//for (uint32_t k = 0; k < nEmitters; k++)
