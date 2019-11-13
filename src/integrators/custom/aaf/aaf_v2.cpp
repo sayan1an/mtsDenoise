@@ -272,7 +272,7 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 return getDistanceFromCenter(vertexPositions[0], w2l);
 	 }
 
-	 Float sample(Point &p, Sampler *sampler, const Point &ref,
+	 Float sample(Point &p, Normal &n, Sampler *sampler, const Point &ref,
 		 const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY,
 		 Float w2lDet = 1.0f,
 		 const Matrix3x3 &l2w = GET_MAT3x3_IDENTITY)
@@ -287,7 +287,7 @@ static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage
 		 Float area0;
 		 Float area1;
 
-		 triangleEmitters[0].computeAreaNormal(area0, w2l);
+		 n = triangleEmitters[0].computeAreaNormal(area0, w2l);
 		 triangleEmitters[1].computeAreaNormal(area1, w2l);
 		
 		 area0 /= (area0 + area1);
@@ -430,7 +430,7 @@ public:
         ref<Sensor> sensor = static_cast<Sensor *>(sched->getResource(sensorResID));
         ref<Film> film = sensor->getFilm();
         auto cropSize = film->getCropSize();
-		size_t nCores = 1;// sched->getCoreCount();
+		size_t nCores = sched->getCoreCount();
         Sampler *sampler_main = static_cast<Sampler *>(sched->getResource(samplerResID, 0));
         size_t sampleCount = sampler_main->getSampleCount();
 
@@ -589,7 +589,7 @@ public:
 
 	Spectrum sampleDirect(uint32_t emitterIdx, DirectSamplingRecord &dRec, Sampler *sampler)
 	{
-		Float emitterPdf = emitterSamplers[emitterIdx].sample(dRec.p, sampler, dRec.ref);
+		Float emitterPdf = emitterSamplers[emitterIdx].sample(dRec.p, dRec.n, sampler, dRec.ref);
 		dRec.d = dRec.p - dRec.ref;
 		dRec.dist = dRec.d.length();
 		dRec.d /= dRec.dist;
@@ -619,6 +619,8 @@ public:
 		for (uint32_t emitterIdx = 0; emitterIdx < emitterCount; emitterIdx++) {
 				// compute the sum {I(y) V(y)} - here I(y) is gaussian light source
 				Spectrum hitCount(0.0f);
+				Float d1Avg = 0;
+				Float d1Count = 0;
 				for (size_t i = 0; i < nEmitterSamples; i++) {
 					Spectrum value = sampleDirect(emitterIdx, dRec, rRec.sampler);
 					RayDifferential shadowRay(prd.its->p, dRec.d, prd.primaryRay->time);
@@ -631,20 +633,23 @@ public:
 					const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 					// apply gaussian falloff according to distance from center
-					hitCount += intersectObject ? Spectrum(0.0f) :  bsdfVal * value; // Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - dRec.p).length(), emitterSamplers[emitterIdx].getSize()));
+					hitCount += intersectObject ? Spectrum(0.0f) : bsdfVal * value; //  gaussian1D(emitterSamplers[emitterIdx].getDistanceFromCenter(dRec.p), emitterSamplers[emitterIdx].getSize()) * emitterSamplers[emitterIdx].radiance; 
 					
 					// collect distance d1, d2Max, d2Min
 					if (intersectObject && value.average() > 0) {
-						ppd.d1[emitterIdx] += (dRec.p - prd.its->p).length();
-						Float d2 = (dRec.p - its.p).length();
+						d1Avg += abs(dot(dRec.n, (dRec.p - prd.its->p)));
+						Float d2 = abs(dot(dRec.n, (dRec.p - its.p)));
 
 						if (d2 < ppd.d2Min[emitterIdx])
 							ppd.d2Min[emitterIdx] = d2;
 						if (d2 > ppd.d2Max[emitterIdx])
 							ppd.d2Max[emitterIdx] = d2;
+
+						d1Count = d1Count + 1;
 					}
 				}
-								
+				
+				ppd.d1[emitterIdx] = d1Count > 0 ? d1Avg / d1Count : 0;
 				ppd.totalNumShadowSample[emitterIdx] += nEmitterSamples;
 				ppd.colorEmitter[emitterIdx] += hitCount;
 		}
@@ -733,7 +738,7 @@ public:
 						const Spectrum bsdfVal = ((prd.its)->getBSDF(*prd.primaryRay))->eval(bRec);
 
 						// apply gaussian falloff according to distance from center
-						hitCount += intersectObject ? Spectrum(0.0f) : value * bsdfVal; // Spectrum(gaussian1D((emitterSamplers[emitterIdx].getCenter() - dRec.p).length(), emitterSamplers[emitterIdx].getSize()));
+						hitCount += intersectObject ? Spectrum(0.0f) : value * bsdfVal; //  gaussian1D(emitterSamplers[emitterIdx].getDistanceFromCenter(dRec.p), emitterSamplers[emitterIdx].getSize()) * emitterSamplers[emitterIdx].radiance;
 					}
 
 					ppd.colorEmitter[emitterIdx] += hitCount;
