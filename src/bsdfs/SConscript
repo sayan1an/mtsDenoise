@@ -22,6 +22,7 @@ plugins += env.SharedLibrary('normalmap', ['normalmap.cpp'])
 
 #custom
 plugins += env.SharedLibrary('simplemicrofacet', ['custom/SimpleMicrofacet.cpp'])
+plugins += env.SharedLibrary('approxmicrofacet', ['custom/ApproxMicrofacet.cpp'])
 
 # Other materials
 plugins += env.SharedLibrary('ward', ['ward.cpp'])

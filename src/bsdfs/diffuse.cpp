@@ -107,6 +107,10 @@ public:
         return m_reflectance->eval(its);
     }
 
+	bool isDiffuse() const {
+		return true;
+	}
+
     Spectrum eval(const BSDFSamplingRecord &bRec, EMeasure measure) const {
         if (!(bRec.typeMask & EDiffuseReflection) || measure != ESolidAngle
             || Frame::cosTheta(bRec.wi) <= 0

@@ -84,7 +84,7 @@ public:
      */
     inline BSDFSamplingRecord(const Intersection &its, const Vector &wo,
         ETransportMode mode = ERadiance);
-
+	
     /**
      * \brief Given a surface interaction an an incident/exitant direction
      * pair (wi, wo), create a query record to evaluate the BSDF or its
@@ -341,6 +341,8 @@ public:
         return Spectrum(0.0f);
     }
 
+	virtual void transform(const Intersection &its, const Float &theta, Matrix3x3 &mInv, Float &amplitude) const { std::cerr << "BSDF: transform not implemented." << std::endl; }
+
     /**
      * \brief Sample the BSDF and return the importance weight (i.e. the
      * value of the BSDF divided by the probability density of the sample).
@@ -475,6 +477,10 @@ public:
      */
     virtual void getFrameDerivative(const Intersection &its,
             Frame &du, Frame &dv) const;
+
+	virtual bool isDiffuse() const {
+		return false;
+	}
 
     // =============================================================
     //! @{ \name ConfigurableObject interface

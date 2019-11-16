@@ -24,6 +24,7 @@ plugins += env.SharedLibrary('motion', ['misc/motion.cpp'])
 plugins += env.SharedLibrary('aaf', ['custom/aaf/aaf.cpp'])
 plugins += env.SharedLibrary('aaf2', ['custom/aaf/aaf_v2.cpp'])
 plugins += env.SharedLibrary('aaf2t', ['custom/aaf/aaf_v2_bTest.cpp'])
+plugins += env.SharedLibrary('aaf3', ['custom/aaf/aaf_v3.cpp'])
 
 # Bidirectional techniques
 bidirEnv = env.Clone()
