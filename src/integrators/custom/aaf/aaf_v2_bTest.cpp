@@ -584,13 +584,14 @@ public:
 		return exp(-(x * x) / (2.f * sigma * sigma)) / (sqrt_2_pi * sigma);
 	}
 
-	bool groundTruth = true;
-	size_t nEmitterSamples = 5; //intial samples
+	bool groundTruth = false;
+	size_t nEmitterSamples = 500; //intial samples
 	Float alpha = 1.0f; // bandlimit alpha
 	Float mu = 2.0f;
-	Float  maxAdaptiveSamples = 5.0f;
+	Float  maxAdaptiveSamples = 500.0f;
 	Float gaussianSpreadCorrection = 3.0f;
 	int maxFilterWidth = 10;
+	Float sigmaMultiplier = 0.1f;
 
 	Spectrum sampleDirect(uint32_t emitterIdx, DirectSamplingRecord &dRec, Sampler *sampler)
 	{
@@ -723,7 +724,7 @@ public:
 
 					// Calculate pixel area and light area
 					const float Ap = 1.f / (ppd.omegaMaxPix *ppd.omegaMaxPix);
-					const float sigma = emitterSamplers[emitterIdx].getSize();
+					const float sigma = sigmaMultiplier * emitterSamplers[emitterIdx].getSize();
 					const float Al = 4.f * sigma * sigma;
 
 					// Calcuate number of additional samples
@@ -909,12 +910,12 @@ public:
 				size_t currPix = j * cropSize.x + i;
 				const PerPixelData &pData = pBuffer[currPix];
 				throughputPix[currPix] = Spectrum(0.0f);
-				throughputPix[currPix] = pData.color;
+				//throughputPix[currPix] = pData.color;
 
 				// for unblurred results
-				for (uint32_t k = 0; k < nEmitters; k++) {
-					throughputPix[currPix] += pData.colorEmitter[k];
-				}
+				///for (uint32_t k = 0; k < nEmitters; k++) {
+					//throughputPix[currPix] += pData.colorEmitter[k];
+				//}
 
 				// For blurred results
 				//for (uint32_t k = 0; k < nEmitters; k++) {
@@ -932,12 +933,12 @@ public:
 					//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 10);
 
 				// Visualize numAdaptiveSamples
-				//for (uint32_t k = 0; k < emitterCount; k++)
-					//throughputPix[currPix] += Spectrum(pData.isOccluded ? pData.totalNumShadowSample[k] : 0);
+				for (uint32_t k = 0; k < emitterCount; k++)
+					throughputPix[currPix] += Spectrum(pData.isOccluded ? pData.totalNumShadowSample[k] : 0);
 				//if (pData.isOccluded)
 					//std::cout << pData.totalNumShadowSample[0] << " " << pData.colorEmitter[0].average() <<  std::endl;
-				//throughputPix[currPix] /= nEmitters;
-				//throughputPix[currPix] /= maxAdaptiveSamples;
+				throughputPix[currPix] /= nEmitters;
+				throughputPix[currPix] /= maxAdaptiveSamples;
 
 				//if (pData.isOccluded)
 					//if (pData.d1[0] < pData.d2Min[0] || pData.d1[0] < pData.d2Max[0] || pData.d2Max[0] < pData.d2Min[0])

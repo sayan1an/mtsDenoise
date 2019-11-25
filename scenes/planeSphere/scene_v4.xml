@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 
 <scene version="0.6.0" >
-	<integrator type="aaf2t"></integrator>
+	<integrator type="entropy"></integrator>
 	<sensor type="perspective" >
 		<float name="fov" value="60" />
 		<transform name="toWorld" >
@@ -23,9 +23,10 @@
 	<bsdf type="diffuse" id="Backdrop" >
 			<rgb name="reflectance" value="0.1, 0.1, 0.1"/>
 	</bsdf>
-	<bsdf type="simplemicrofacet" id="RoughAluminium" >
+	<bsdf type="approxmicrofacet" id="RoughAluminium" >
 		<float name="alpha" value="0.1" />
 		<string name="distribution" value="ggx" />
+		<rgb name="diffuseReflectance" value="0.1, 0.1, 0.1"/>
 		<rgb name="specularReflectance" value="0.578596, 0.578596, 0.578596"/>
 	</bsdf>
 	<bsdf type="simplemicrofacet" id="RoughSteel" >
@@ -95,10 +96,10 @@
 	</shape>
 	<shape type="sphere" >
 		<transform name="toWorld" >
-			<matrix value="0.5 0 0 0 0 0.5 0 0.55 0 0 0.5 0 0 0 0 1"/>
+			<!--<matrix value="0.5 0 0 0 0 0.5 0 0.55 0 0 0.5 0 0 0 0 1"/>-->
 			<!--<matrix value="0.5 0 0 0 0 0.5 0 0.70 0 0 0.5 0 0 0 0 1"/>-->
 			<!--<matrix value="0.5 0 0 0 0 0.5 0 0.85 0 0 0.5 0 0 0 0 1"/>-->
-			<!--<matrix value="0.5 0 0 0 0 0.5 0 0.78 0 0 0.5 0 0 0 0 1"/>-->
+			<matrix value="0.5 0 0 0 0 0.5 0 0.78 0 0 0.5 0 0 0 0 1"/>
 		</transform>
 		<ref id="Backdrop" />
 	</shape>
@@ -106,6 +107,7 @@
 		<string name="filename" value="models/quad.obj" />
 		<transform name="toWorld" >
 			<matrix value="2 0 0 0 0 2 0 2 0 0 2 0 0 0 0 1"/>
+			<!--<matrix value="2 0 0 1 0 2 0 2 0 0 2 0 0 0 0 1"/>-->
 			<!--<matrix value="2 0 0 3 0 2 0 2 0 0 2 0 0 0 0 1"/>-->
 			<!--<matrix value="2 0 0 5 0 2 0 2 0 0 2 0 0 0 0 1"/>-->
 		</transform>
