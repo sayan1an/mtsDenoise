@@ -174,8 +174,24 @@ struct EmitterNode
 			c * sample1 * (1.0f - rSample.y);
 	}
 
-	void partition(std::vector<Point2> &baryCoords)
-	{
+	bool partition(std::vector<Point2> &baryCoords)
+	{	
+		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
+		if (allNullPtr == 0) {
+			// recurse to leaf node
+			uint32_t numPart = nextNode[0]->partition(baryCoords) + 
+				nextNode[1]->partition(baryCoords) + 
+				nextNode[2]->partition(baryCoords);
+
+			return numPart > 0;
+		}
+		else if (allNullPtr < 3) {
+			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
+			return false;
+		}
+
+		// Check if there is need for partion based on entropy
+
 		// compute appropriate pivot location
 		const Point2 &a = baryCoords[idx[0]];
 		const Point2 &b = baryCoords[idx[1]];
@@ -188,6 +204,33 @@ struct EmitterNode
 		nextNode[0] = new EmitterNode(indexPivot, idx[0], idx[1]);
 		nextNode[1] = new EmitterNode(indexPivot, idx[1], idx[2]);
 		nextNode[2] = new EmitterNode(indexPivot, idx[2], idx[0]);
+		
+		return true;
+	}
+
+	// recursively call analaytic
+	Spectrum eval(const std::vector<Point2> &baryCoords,
+		const BaseEmitter *emitter,
+		const Point3 &receiverPos,
+		const Matrix3x3 &rotMat,
+		const Spectrum &diffuseComponent, const Spectrum &specularComponent,
+		const Matrix3x3 &w2l_bsdf = GET_MAT3x3_IDENTITY,
+		const float &amplitude = 1)
+	{
+		// Check if all nextNode are either null or have some value
+
+		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
+
+		if (allNullPtr == 3)
+			return analytic(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude);
+		else if (allNullPtr > 0)
+			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
+		else {
+			return nextNode[0]->eval(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude) +
+				nextNode[1]->eval(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude) +
+				nextNode[2]->eval(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude);
+		}
+
 	}
 
 	Spectrum analytic(const std::vector<Point2> &baryCoords, 
@@ -217,7 +260,7 @@ struct EmitterNode
 		Float result = Analytic::integrate(localEdge0, localEdge1, localEdge2);
 
 		// Note that each triangle is considered a light source, hence we apply single sided or double sided processing here.
-		if (true) // One sided light source
+		if (false) // One sided light source
 			result = result > 0.0f ? result : 0.0f;
 		else // double sided light source
 			result = std::abs(result);
@@ -241,8 +284,10 @@ struct EmitterTree
 {	
 	const BaseEmitter *baseEmitter = nullptr;
 	std::vector<Point2> baryCoords; // pivot points for partitioning
-	std::vector<Point2> samples;
+	// Next two are sample visibility pairs
+	std::vector<Point2> samples; // samples stored as barycentric coords
 	std::vector<bool> visibility;
+
 	EmitterNode *root = nullptr;
 
 	// This will recursively get 1 sample at each leaf node
@@ -250,14 +295,20 @@ struct EmitterTree
 	// put the visibility in visibility 
 	void sample();
 
+	// This will recursively go down to the leaf node and partition the leaf node if required.
+	bool partition() 
+	{
+		return root->partition(baryCoords);
+	}
+
 	// This will recursively evaluate the tesselated triangles.
-	void eval(const Point3 &receiverPos,
+	Spectrum eval(const Point3 &receiverPos,
 		const Matrix3x3 &rotMat,
 		const Spectrum &diffuseComponent, const Spectrum &specularComponent,
 		const Matrix3x3 &w2l_bsdf = GET_MAT3x3_IDENTITY,
 		const float &amplitude = 1) 
 	{
-
+		return root->eval(baryCoords, baseEmitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude);
 	}
 
 	void init(const BaseEmitter *baseEmitterPtr)
@@ -589,9 +640,9 @@ public:
 				const Point *vertexPositions = triMesh->getVertexPositions();
 				for (uint32_t i = 0; i < triMesh->getTriangleCount(); i++) 
 				{
-					emitters[numEmitters].vertexPositions[0] = vertexPositions[triangles[i].idx[0]];
-					emitters[numEmitters].vertexPositions[1] = vertexPositions[triangles[i].idx[1]];
-					emitters[numEmitters].vertexPositions[2] = vertexPositions[triangles[i].idx[2]];
+					emitters[numEmitters].vertexPositions[0] = vertexPositions[triangles[i].idx[2]];
+					emitters[numEmitters].vertexPositions[1] = vertexPositions[triangles[i].idx[0]];
+					emitters[numEmitters].vertexPositions[2] = vertexPositions[triangles[i].idx[1]];
 					emitters[numEmitters].radiance = emitter->getRadiance();
 					numEmitters++;
 				}
@@ -685,6 +736,17 @@ public:
 			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
+		
+		for (uint32_t i = 0; i < emitterCount; i++) {
+			ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			ppd.trees[i].partition();
+			ppd.trees[i].partition();
+		}
 
 		const Scene *scene = rRec.scene;
 		DirectSamplingRecord dRec(*prd.its);
@@ -694,14 +756,19 @@ public:
 		Float amplitude = 1.0f;
 		Float ltcW2lDet = 1.0f;
 		Matrix3x3 rotMat = GET_MAT3x3_IDENTITY;
+		Spectrum diffuseComponent(0.0f);
+		Spectrum specularComponent(0.0f);
 
-		if (!getMatrices(prd, rotMat, ltcW2l, ltcW2lDet, amplitude))
+		if (!getMatrices(prd, rotMat, ltcW2l, ltcW2lDet, amplitude, diffuseComponent, specularComponent))
 			return;
 
-		//ppd.trees[0].eval();
+		for (uint32_t i = 0; i < emitterCount; i++) {
+			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, rotMat, diffuseComponent, specularComponent);
+		}
+	
 	}
 
-	bool getMatrices(const PrimaryRayData &prd, Matrix3x3 &rotMat, Matrix3x3 &ltcW2l, Float &ltcW2lDet, Float &amplitude)
+	bool getMatrices(const PrimaryRayData &prd, Matrix3x3 &rotMat, Matrix3x3 &ltcW2l, Float &ltcW2lDet, Float &amplitude, Spectrum &diffuseComponent, Spectrum &specularComponent)
 	{
 		ltcW2l = GET_MAT3x3_IDENTITY;
 		amplitude = 1.0f;
@@ -715,9 +782,12 @@ public:
 
 		Float thetaIncident = std::acos(cosThetaIncident);
 		const BSDF *bsdf = ((prd.its)->getBSDF(*prd.primaryRay));
-
-		if (!bsdf->isDiffuse())
+		diffuseComponent = bsdf->getDiffuseReflectance(*prd.its);
+		specularComponent = Spectrum(0.0f);
+		if (!bsdf->isDiffuse()) {
 			bsdf->transform(*prd.its, thetaIncident, ltcW2l, amplitude);
+			specularComponent = bsdf->getSpecularReflectance(*prd.its);
+		}
 
 		return true;
 	}
