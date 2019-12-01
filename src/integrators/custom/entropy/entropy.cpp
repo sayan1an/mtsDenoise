@@ -21,6 +21,7 @@
 #include <mitsuba/core/statistics.h>
 #include <mitsuba/render/integrator.h>
 
+#include <vector>
 #include <functional>
 #include <algorithm>
 #include <thread>
@@ -28,7 +29,12 @@
 #include <mitsuba/core/lock.h>
 #include <mitsuba/core/thread.h>
 
+#include "analytic.h"
+
 MTS_NAMESPACE_BEGIN
+
+#define GET_MAT3x3_IDENTITY ([](Matrix3x3 &m) {	m.setIdentity(); return static_cast<const Matrix3x3>(m); } (Matrix3x3(0.0f)))
+
 
 /************************************************************************
    * Block Scheduler
@@ -145,19 +151,250 @@ private:
 
 static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage);
 
-struct TriangleEmitters
- {
-	 uint32_t idx[3];
-	 const Point *vertexPositions; // pointer to world positions
+struct BaseEmitter
+{
+	Point vertexPositions[3];
+	Spectrum radiance;
+};
+
+struct EmitterNode 
+{
+	EmitterNode *nextNode[3] = {nullptr, nullptr, nullptr};
+	uint32_t idx[3]; // index of the vertices of current node
 	
-	 void init(const Point *vertices, uint32_t i0, uint32_t i1, uint32_t i2)
-	 {
-		 vertexPositions = vertices;
-		 idx[0] = i0;
-		 idx[1] = i1;
-		 idx[2] = i2;
+	void sample(const std::vector<Point2> &coordinates, const Point2 &rSample, Point2 &sampledPoint)
+	{
+		const Point2 &a = coordinates[idx[0]];
+		const Point2 &b = coordinates[idx[1]];
+		const Point2 &c = coordinates[idx[2]];
+
+		Float sample1 = sqrt(rSample.x);
+	
+		sampledPoint = a * (1.0f - sample1) + b * sample1 * rSample.y +
+			c * sample1 * (1.0f - rSample.y);
+	}
+
+	void partition(std::vector<Point2> &baryCoords)
+	{
+		// compute appropriate pivot location
+		const Point2 &a = baryCoords[idx[0]];
+		const Point2 &b = baryCoords[idx[1]];
+		const Point2 &c = baryCoords[idx[2]];
+
+		uint32_t indexPivot = static_cast<uint32_t>(baryCoords.size());
+		// push the centroid as pivot for now
+		baryCoords.push_back((a + b + c) / 3);
+		
+		nextNode[0] = new EmitterNode(indexPivot, idx[0], idx[1]);
+		nextNode[1] = new EmitterNode(indexPivot, idx[1], idx[2]);
+		nextNode[2] = new EmitterNode(indexPivot, idx[2], idx[0]);
+	}
+
+	Spectrum analytic(const std::vector<Point2> &baryCoords, 
+		const BaseEmitter *emitter, 
+		const Point3 &receiverPos, 
+		const Matrix3x3 &rotMat, 
+		const Spectrum &diffuseComponent, const Spectrum &specularComponent,
+		const Matrix3x3 &w2l_bsdf = GET_MAT3x3_IDENTITY, 
+		const float &amplitude = 1)
+	{	
+		Spectrum sum(0.0f);
+
+		// get the barycentric coords of the adaptive-triangle
+		const Point2 &a = baryCoords[idx[0]];
+		const Point2 &b = baryCoords[idx[1]];
+		const Point2 &c = baryCoords[idx[2]];
+
+		// compute the vertices of the adaptive-trinagle in world space
+		Point3 worldSpaceVertex0 = a.x * emitter->vertexPositions[0] + a.y * emitter->vertexPositions[1] + (1 - a.x - a.y) *  emitter->vertexPositions[2];
+		Point3 worldSpaceVertex1 = b.x * emitter->vertexPositions[0] + b.y * emitter->vertexPositions[1] + (1 - b.x - b.y) *  emitter->vertexPositions[2];
+		Point3 worldSpaceVertex2 = c.x * emitter->vertexPositions[0] + c.y * emitter->vertexPositions[1] + (1 - c.x - c.y) *  emitter->vertexPositions[2];
+
+		Vector3 localEdge0 = rotMat * (worldSpaceVertex0 - receiverPos);
+		Vector3 localEdge1 = rotMat * (worldSpaceVertex1 - receiverPos);
+		Vector3 localEdge2 = rotMat * (worldSpaceVertex2 - receiverPos);
+
+		Float result = Analytic::integrate(localEdge0, localEdge1, localEdge2);
+
+		// Note that each triangle is considered a light source, hence we apply single sided or double sided processing here.
+		if (true) // One sided light source
+			result = result > 0.0f ? result : 0.0f;
+		else // double sided light source
+			result = std::abs(result);
+
+		sum = diffuseComponent * result * 0.5f * INV_PI;
+
+		return sum * emitter->radiance;
+	}
+	
+	void entropy();
+	
+	EmitterNode(uint32_t i0, uint32_t i1, uint32_t i2)
+	{
+		idx[0] = i0;
+		idx[1] = i1;
+		idx[2] = i2;
+	}
+};
+
+struct EmitterTree
+{	
+	const BaseEmitter *baseEmitter = nullptr;
+	std::vector<Point2> baryCoords; // pivot points for partitioning
+	std::vector<Point2> samples;
+	std::vector<bool> visibility;
+	EmitterNode *root = nullptr;
+
+	// This will recursively get 1 sample at each leaf node
+	// put the bary-coord of sample in baryCoords
+	// put the visibility in visibility 
+	void sample();
+
+	// This will recursively evaluate the tesselated triangles.
+	void eval(const Point3 &receiverPos,
+		const Matrix3x3 &rotMat,
+		const Spectrum &diffuseComponent, const Spectrum &specularComponent,
+		const Matrix3x3 &w2l_bsdf = GET_MAT3x3_IDENTITY,
+		const float &amplitude = 1) 
+	{
+
+	}
+
+	void init(const BaseEmitter *baseEmitterPtr)
+	{
+		baseEmitter = baseEmitterPtr;
+		baryCoords.push_back(Point2(1, 0));
+		baryCoords.push_back(Point2(0, 1));
+		baryCoords.push_back(Point2(0, 0));
+		root = new EmitterNode(0, 1, 2);
+	}
+};
+
+/*
+struct TriangleEmitters
+{
+	uint32_t idx[3];
+	const Point *vertexPositions; // pointer to world positions
+	
+	void init(const Point *vertices, uint32_t i0, uint32_t i1, uint32_t i2)
+	{
+		vertexPositions = vertices;
+		idx[0] = i0;
+		idx[1] = i1;
+		idx[2] = i2;
+	}
+
+	 Normal computeAreaNormal(Float &area, const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY) const
+	 {	
+		 const Point p0 = Point(w2l * Vector(vertexPositions[idx[0]]));
+		 const Point p1 = Point(w2l * Vector(vertexPositions[idx[1]]));
+		 const Point p2 = Point(w2l * Vector(vertexPositions[idx[2]]));
+
+		 return computeAreaNormal(area, p0, p1, p2);
 	 }
- };
+
+	 Spectrum getAnalytic(const Point &ref, const Matrix3x3 &rotMat, const Matrix3x3 &ltcW2l, const Float amplitude, const Spectrum &diffuseComponent, const Spectrum &specularComponent)
+	 {	
+		 Spectrum sum(0.0f);
+
+		 Vector e0 = rotMat * (vertexPositions[idx[2]] - ref);
+		 Vector e1 = rotMat * (vertexPositions[idx[1]] - ref);
+		 Vector e2 = rotMat * (vertexPositions[idx[0]] - ref);
+
+		 Float result = Analytic::integrate(e0, e1, e2);
+
+		 // Note that each triangle is considered a light source, hence we apply single sided or double sided processing here.
+		 if (true) // One sided light source
+			 result = result > 0.0f ? result : 0.0f;
+		 else // double sided light source
+			 result = std::abs(result);
+
+		 sum = diffuseComponent * result * 0.5f * INV_PI;
+
+		 e0 = ltcW2l * e0;
+		 e1 = ltcW2l * e1;
+		 e2 = ltcW2l * e2;
+
+		 result = Analytic::integrate(e0, e1, e2);
+		
+		 if (true) // One sided light source
+			 result = result > 0.0f ? result : 0.0f;
+		 else // double sided light source
+			 result = std::abs(result);
+
+		 sum += specularComponent * result * amplitude * 0.5f * INV_PI;
+
+		 return sum;
+	 }
+		
+	 // return pdf in solid angle
+	 // sample in local space
+	 // multiply the pdf with appropriate jacobian
+	 Float sample(Point &p, Point2f &sample, const Point &ref = Point(0.0f), 
+			const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY,
+			Float w2lDet = 1.0f,
+			const Matrix3x3 &l2w = GET_MAT3x3_IDENTITY) const
+	 {	
+		 const Point p0 = Point(w2l * (vertexPositions[idx[0]] - ref));
+		 const Point p1 = Point(w2l * (vertexPositions[idx[1]] - ref));
+		 const Point p2 = Point(w2l * (vertexPositions[idx[2]] - ref));
+
+		 Float sample1 = sqrt(sample.x);
+	
+		 Vector directionLocal = Vector(p0 * (1.0f - sample1) + p1 * sample1 * sample.y +
+			 p2 * sample1 * (1.0f - sample.y));
+		 
+		 Vector directionWorld = l2w * directionLocal;
+		 p = Point(directionWorld) + ref;
+		 
+		 // Note that we are not doing rejection sampling
+		 // To do rejection sampling, if the triangle goes below horizon in local space, it must be clipped and the area/pdfNorm must be adjusted. Also we cannot have a sample below the horizon.
+		 // Since we are not doing rejection sampling, if a direction is below the horizon in local space, it'll evaluate to zero when computing the brdf anyway, 
+         // so we can return a zero pdf, even though the pdf is non-zero.
+		 //if (directionLocal.z <= Epsilon)
+			 //return 0.0f;
+		 
+		 directionWorld /= directionWorld.length();
+		 
+		 // compute pdf in local space
+		 Float pdfLocal = 0;
+		 {	
+			 Float area = 0;
+			 Normal nLocal = computeAreaNormal(area, p0, p1, p2);
+
+			 Float dist = directionLocal.length();
+
+			 directionLocal /= dist;
+
+			 Float cosineFactor = -dot(directionLocal, nLocal);
+			 if (cosineFactor <= Epsilon)
+				 return 0.0f;
+
+			 pdfLocal = dist * dist / (area * cosineFactor);
+		 }
+
+		 // compute the jacobian
+		 Float jacobian = 1.0;
+		 {
+			 Vector w = w2l * directionWorld;
+			 Float length = w.length();
+			 jacobian = w2lDet / (length * length * length);
+		 }
+		 
+		 return pdfLocal * jacobian;
+	 }
+ private:
+	 // compute area and normal
+	Normal computeAreaNormal(Float &area, const Point &p0, const Point &p1, const Point &p2) const
+	{
+		Normal n = cross(p1 - p0, p2 - p0);
+		area = n.length();
+		n /= area;
+		area *= 0.5f;
+
+		return n;
+	}
+};
 
 struct EmitterSampler
  {
@@ -169,16 +406,37 @@ struct EmitterSampler
 
 	 TriangleEmitters *triangleEmitters;
  };
+ */
 
- struct PrimaryRayData 
- {
+struct PrimaryRayData 
+{
 	Intersection *its;
 	RayDifferential *primaryRay;
 	Float depth;
     int objectId;
- };
+};
 
- class Entropy : public Integrator {
+struct PerPixelData
+{
+	EmitterTree *trees = nullptr;
+	Spectrum colorDirect;
+	Spectrum *colorShaded;
+
+	void init(const BaseEmitter *emitters, const uint32_t numEmitters)
+	{
+		trees = new EmitterTree[numEmitters];
+		colorShaded = new Spectrum[numEmitters];
+
+		for (uint32_t i = 0; i < numEmitters; i++) {
+			trees[i].init(&emitters[i]);
+			colorShaded[i] = Spectrum(0.0f);
+		}
+
+		colorDirect = Spectrum(0.0f);
+	}
+};
+
+class Entropy : public Integrator {
 public:
 	Entropy(const Properties &props)
 		: Integrator(props) {}
@@ -221,8 +479,11 @@ public:
 			return true;
 		}
 
+		collectEmitterParameters(scene);
+
 		// global buffer
-		PrimaryRayData *gBuffer = new PrimaryRayData[cropSize.x * cropSize.y];
+		gBuffer = new PrimaryRayData[cropSize.x * cropSize.y];
+		perPixelData = new PerPixelData[cropSize.x * cropSize.y];
 					
         // Results for saving the computation
         ref<Bitmap> result = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, cropSize);
@@ -270,21 +531,35 @@ public:
 				sensorRay, samplePos, apertureSample, timeSample);
 			gBufferPass(sensorRay, rRec, gBuffer[pixelID]);
             sampler->advance();
+
+			perPixelData[pixelID].init(emitters, emitterCount);
         });
 
 		std::cout << "Finished GBuffer pass." << std::endl;
 
-		gBufferToImage(result, gBuffer, cropSize);
-        film->setBitmap(result);
+		runPool.run([&](int pixelID, int threadID) {
+			ThreadData &td = threadData[threadID];
+			auto sampler = td.sampler.get();
+			RadianceQueryRecord rRec(scene, sampler);
+
+			int i = pixelID % cropSize.x;
+			int j = pixelID / cropSize.x;
+			sampler->generate(Point2i(i, j));
+
+			shadeAnalytic(rRec, gBuffer[pixelID], perPixelData[pixelID]);
+		});
+
+		//gBufferToImage(result, gBuffer, cropSize);
+		pBufferToImage(result, perPixelData, cropSize);
+		film->setBitmap(result);
 		
 		return true;
     }
 
 	void collectEmitterParameters(Scene *scene)
 	{
-		auto emitters = scene->getEmitters();
 		uint32_t numEmitters = 0;
-		for (auto emitter : emitters)
+		for (auto emitter : scene->getEmitters())
 		{
 			if (!emitter->isOnSurface())
 				std::cerr << "Ignoring light sources other than area light." << std::endl;
@@ -293,13 +568,15 @@ public:
 					std::cerr << "Ignoring emitter with no shape." << std::endl;
 				else if (typeid(*(emitter->getShape())) != typeid(TriMesh))
 					std::cerr << "Ignoring emitter geometry other than TriMesh. RectMesh is possible but not yet supported." << std::endl;
-				else
-					numEmitters++;
+				else {
+					const TriMesh *triMesh = static_cast<const TriMesh *>(emitter->getShape());
+					numEmitters += (uint32_t)triMesh->getTriangleCount();
+				}
 			}
 		}
 
 		emitterCount = numEmitters;
-		emitterSamplers = new EmitterSampler[numEmitters];
+		emitters = new BaseEmitter[numEmitters];
 
 		numEmitters = 0;
 		for (auto emitter : scene->getEmitters()) {
@@ -308,24 +585,22 @@ public:
 				typeid(*(emitter->getShape())) == typeid(TriMesh)) {
 
 				const TriMesh *triMesh = static_cast<const TriMesh *>(emitter->getShape());
-				emitterSamplers[numEmitters].vertexCount = (uint32_t)triMesh->getVertexCount();
-				emitterSamplers[numEmitters].triangleCount = (uint32_t)triMesh->getTriangleCount();
-				emitterSamplers[numEmitters].vertexPositions = triMesh->getVertexPositions();
-
-				emitterSamplers[numEmitters].triangleEmitters = new TriangleEmitters[triMesh->getTriangleCount()];
 				const Triangle *triangles = triMesh->getTriangles();
-
-				for (uint32_t i = 0; i < triMesh->getTriangleCount(); i++)
-					emitterSamplers[numEmitters].triangleEmitters[i].init(triMesh->getVertexPositions(), triangles[i].idx[0], triangles[i].idx[1], triangles[i].idx[2]);
-				
-				emitterSamplers[numEmitters].radiance = emitter->getRadiance();
-				numEmitters++;
+				const Point *vertexPositions = triMesh->getVertexPositions();
+				for (uint32_t i = 0; i < triMesh->getTriangleCount(); i++) 
+				{
+					emitters[numEmitters].vertexPositions[0] = vertexPositions[triangles[i].idx[0]];
+					emitters[numEmitters].vertexPositions[1] = vertexPositions[triangles[i].idx[1]];
+					emitters[numEmitters].vertexPositions[2] = vertexPositions[triangles[i].idx[2]];
+					emitters[numEmitters].radiance = emitter->getRadiance();
+					numEmitters++;
+				}
 			}
 		}
 	}
 
-	 void gBufferPass(const RayDifferential &primaryRay, RadianceQueryRecord &rRec, PrimaryRayData &prd) 
-	 {
+	void gBufferPass(const RayDifferential &primaryRay, RadianceQueryRecord &rRec, PrimaryRayData &prd) 
+	{
         Intersection &its = rRec.its;
 		RayDifferential ray(primaryRay);
         bool intersect = rRec.rayIntersect(ray);
@@ -347,6 +622,105 @@ public:
 		prd.depth = (its.p - primaryRay.o).length();
 		prd.objectId = 0;
     }
+
+	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize)
+	{
+		Spectrum *throughputPix = (Spectrum *)result->getData();
+
+		for (size_t j = 0; j < cropSize.y; j++)
+			for (size_t i = 0; i < cropSize.x; i++) {
+				size_t currPix = j * cropSize.x + i;
+				const PerPixelData &pData = pBuffer[currPix];
+				throughputPix[currPix] = Spectrum(0.0f);
+				throughputPix[currPix] = pData.colorDirect;
+
+				// for unblurred results
+				for (uint32_t k = 0; k < emitterCount; k++) {
+					throughputPix[currPix] += pData.colorShaded[k];
+				}
+
+				// For blurred results
+				//for (uint32_t k = 0; k < nEmitters; k++) {
+				//throughputPix[currPix] += pData.colorEmitterBlur[k];
+				//}
+
+				// Visualize d1
+				// throughputPix[currPix] = Spectrum(pData.d1[0] / 200);
+
+				// Visualize d2Max
+				//throughputPix[currPix] = Spectrum(pData.d2Max[0]);
+
+				// Visualize d2Min
+				//if (pData.d2Min[0] < std::numeric_limits<Float>::max())
+				//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 200);
+
+				// Visualize numAdaptiveSamples
+				//for (uint32_t k = 0; k < emitterCount; k++)
+				//throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
+				//throughputPix[currPix] /= nEmitters;
+				//throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
+
+				// visualize beta
+				//for (uint32_t k = 0; k < nEmitters; k++)
+				//throughputPix[currPix] += Spectrum(pData.beta[k]);
+				//throughputPix[currPix] /= nEmitters;
+				//throughputPix[currPix] /= (maxFilterWidth);
+
+				// visualize depth
+				//throughputPix[currPix] = Spectrum(pData.depth / 1000);
+
+				// Visualize pixel footprint size
+				//if (pData.omegaMaxPix > 0)
+				//throughputPix[currPix] = Spectrum(1 / pData.omegaMaxPix);
+				//else
+				//throughputPix[currPix] = Spectrum(0.0f);
+			}
+	}
+
+	void shadeAnalytic(RadianceQueryRecord &rRec, PrimaryRayData &prd, PerPixelData &ppd)
+	{
+		if (prd.objectId == -2)
+			return;
+		else if (prd.objectId == -1) {
+			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
+			return;
+		}
+
+		const Scene *scene = rRec.scene;
+		DirectSamplingRecord dRec(*prd.its);
+		Intersection its;
+
+		Matrix3x3 ltcW2l = GET_MAT3x3_IDENTITY;
+		Float amplitude = 1.0f;
+		Float ltcW2lDet = 1.0f;
+		Matrix3x3 rotMat = GET_MAT3x3_IDENTITY;
+
+		if (!getMatrices(prd, rotMat, ltcW2l, ltcW2lDet, amplitude))
+			return;
+
+		//ppd.trees[0].eval();
+	}
+
+	bool getMatrices(const PrimaryRayData &prd, Matrix3x3 &rotMat, Matrix3x3 &ltcW2l, Float &ltcW2lDet, Float &amplitude)
+	{
+		ltcW2l = GET_MAT3x3_IDENTITY;
+		amplitude = 1.0f;
+		ltcW2lDet = 1.0f;
+		rotMat = GET_MAT3x3_IDENTITY;
+		Float cosThetaIncident;
+		Analytic::getRotMat(*prd.its, -prd.primaryRay->d, cosThetaIncident, rotMat);
+
+		if (cosThetaIncident < 0)
+			return false;
+
+		Float thetaIncident = std::acos(cosThetaIncident);
+		const BSDF *bsdf = ((prd.its)->getBSDF(*prd.primaryRay));
+
+		if (!bsdf->isDiffuse())
+			bsdf->transform(*prd.its, thetaIncident, ltcW2l, amplitude);
+
+		return true;
+	}
    
 	void gBufferToImage(ref<Bitmap> &result, const PrimaryRayData *gBuffer, const Vector2i &cropSize) 
 	{
@@ -391,7 +765,9 @@ public:
 	MTS_DECLARE_CLASS()
 private:
 	uint32_t emitterCount = 0;
-	EmitterSampler *emitterSamplers = nullptr;
+	BaseEmitter *emitters = nullptr;
+	PerPixelData *perPixelData = nullptr;
+	PrimaryRayData *gBuffer = nullptr;
 };
 
 MTS_IMPLEMENT_CLASS_S(Entropy, false, Integrator)
