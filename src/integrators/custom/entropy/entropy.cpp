@@ -230,7 +230,7 @@ struct EmitterNode
 			}
 		}
 
-		if (store.size() != 1) {
+		if (store.size() > 2) {
 			std::cout << "Problem sampling :" << a.x << " " << a.y << " " << b.x << " " << b.y << " " << c.x << " " << c.y << std ::endl;
 
 			for (auto &s : store)
@@ -372,14 +372,14 @@ struct EmitterTree
 	std::vector<Point2> baryCoords; // pivot points for partitioning
 	// Next two are sample visibility pairs
 	std::vector<Point2> samples; // samples stored as barycentric coords
-	std::vector<bool> visibility;
+	std::vector<bool> visibility; // true == visible
 
 	EmitterNode *root = nullptr;
 
 	// This will recursively get 1 sample at each leaf node
 	// put the bary-coord of sample in baryCoords
 	// put the visibility in visibility 
-	void sample(Sampler *sampler) 
+	void sample(Sampler *sampler, const Normal &reciverNormal, const Point3 &reciverPos) 
 	{	
 		size_t oldIndex = samples.size();
 		root->sample(baryCoords, sampler, samples);
@@ -387,6 +387,25 @@ struct EmitterTree
 
 		for (size_t i = oldIndex; i < newIndex; i++) {
 			// raytrace and update visibility.
+			// convert the light-samples from triangle-space to world space
+			const Point2 &baryCord = baryCoords[i];
+			Point3 worldSpacePosition = baryCord.x * baseEmitter->vertexPositions[0] + baryCord.y * baseEmitter->vertexPositions[1] + (1 - baryCord.x - baryCord.y) *  baseEmitter->vertexPositions[2];
+			Vector direction = worldSpacePosition - reciverPos;
+			if (dot(reciverNormal, direction) < 0) {
+				visibility.push_back(false);
+				continue;
+			}
+
+			Float length = direction.length();
+			direction /= length;
+
+			RayDifferential shadowRay(reciverPos, direction, 0);
+			shadowRay.mint = Epsilon;
+			shadowRay.maxt = length * (1 - ShadowEpsilon);
+			/*
+			 if (!rRec.scene->rayIntersect(shadowRay))
+				visibility.push_back(true);
+			*/
 		}
 
 	}
@@ -840,8 +859,9 @@ public:
 		
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			ppd.trees[i].partition();
+			ppd.trees[i].sample(rRec.sampler, prd.its->shFrame.n, prd.its->p);
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(rRec.sampler);
+			ppd.trees[i].sample(rRec.sampler, prd.its->shFrame.n, prd.its->p);
 			//ppd.trees[i].sample(rRec.sampler);
 			//ppd.trees[i].sample(rRec.sampler);
 			ppd.trees[i].testSampling();
