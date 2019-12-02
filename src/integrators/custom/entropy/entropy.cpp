@@ -157,21 +157,85 @@ struct BaseEmitter
 	Spectrum radiance;
 };
 
+// sample -> compuetEntropy -> partition -> evaluate
+//   /\                            |
+//    |                            | 
+//    -----------------------------
 struct EmitterNode 
 {
 	EmitterNode *nextNode[3] = {nullptr, nullptr, nullptr};
 	uint32_t idx[3]; // index of the vertices of current node
+	bool sampled = false; // set this to true when this node is sampled
+	Float entropy; // compute this in computeEntropy, use neighbour pixels to compute
+	uint32_t nBlack; // find this in computeEntropy, use only current pixel values;
+	uint32_t nWhite; // find this in computeEntropy, use only current pixel values;
 	
-	void sample(const std::vector<Point2> &coordinates, const Point2 &rSample, Point2 &sampledPoint)
-	{
-		const Point2 &a = coordinates[idx[0]];
-		const Point2 &b = coordinates[idx[1]];
-		const Point2 &c = coordinates[idx[2]];
+	void sample(const std::vector<Point2> &baryCoords, Sampler *sampler, std::vector<Point2> &samples)
+	{	
+		// recurse to leaf node
+		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
+		if (allNullPtr == 0) {
+			// recurse to leaf node
+			nextNode[0]->sample(baryCoords, sampler, samples);
+			nextNode[1]->sample(baryCoords, sampler, samples);
+			nextNode[2]->sample(baryCoords, sampler, samples);
 
+			return;
+		}
+		else if (allNullPtr < 3) {
+			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
+			return;
+		}
+
+		// Do not sample if it is already sampled.
+		if (sampled)
+			return;
+
+		const Point2 &a = baryCoords[idx[0]];
+		const Point2 &b = baryCoords[idx[1]];
+		const Point2 &c = baryCoords[idx[2]];
+
+		Point2f rSample = sampler->next2D();
 		Float sample1 = sqrt(rSample.x);
 	
-		sampledPoint = a * (1.0f - sample1) + b * sample1 * rSample.y +
-			c * sample1 * (1.0f - rSample.y);
+		samples.push_back(a * (1.0f - sample1) + b * sample1 * rSample.y +
+			c * sample1 * (1.0f - rSample.y));
+
+		sampled = true;
+	}
+
+	void testSampling(const std::vector<Point2> &baryCoords, const std::vector<Point2> &samples)
+	{
+		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
+		if (allNullPtr == 0) {
+			// recurse to leaf node
+			nextNode[0]->testSampling(baryCoords, samples);
+			nextNode[1]->testSampling(baryCoords, samples);
+			nextNode[2]->testSampling(baryCoords, samples);
+			return;
+		}
+		else if (allNullPtr < 3) {
+			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
+			return;
+		}
+
+		const Point2 &a = baryCoords[idx[0]];
+		const Point2 &b = baryCoords[idx[1]];
+		const Point2 &c = baryCoords[idx[2]];
+
+		std::vector<Point2> store;
+		for (const auto &sample : samples) {
+			if (pointInTriangle(sample, a, b, c)) {
+				store.push_back(sample);
+			}
+		}
+
+		if (store.size() != 1) {
+			std::cout << "Problem sampling :" << a.x << " " << a.y << " " << b.x << " " << b.y << " " << c.x << " " << c.y << std ::endl;
+
+			for (auto &s : store)
+				std::cout << s.x << " " << s.y << std::endl;
+		}
 	}
 
 	bool partition(std::vector<Point2> &baryCoords)
@@ -223,8 +287,10 @@ struct EmitterNode
 
 		if (allNullPtr == 3)
 			return analytic(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude);
-		else if (allNullPtr > 0)
+		else if (allNullPtr > 0) {
 			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
+			return Spectrum(0.0f);
+		}
 		else {
 			return nextNode[0]->eval(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude) +
 				nextNode[1]->eval(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude) +
@@ -270,13 +336,33 @@ struct EmitterNode
 		return sum * emitter->radiance;
 	}
 	
-	void entropy();
+	void computeEntropy();
 	
 	EmitterNode(uint32_t i0, uint32_t i1, uint32_t i2)
 	{
 		idx[0] = i0;
 		idx[1] = i1;
 		idx[2] = i2;
+	}
+private:
+	static Float sign(const Point2f &p1, const Point2f &p2, const Point2f &p3)
+	{
+		return (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y);
+	}
+
+	static bool pointInTriangle(const Point2f &pt, const Point2f &v1, const Point2f &v2, const Point2f &v3)
+	{
+		float d1, d2, d3;
+		bool has_neg, has_pos;
+
+		d1 = sign(pt, v1, v2);
+		d2 = sign(pt, v2, v3);
+		d3 = sign(pt, v3, v1);
+
+		has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+		has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+
+		return !(has_neg && has_pos);
 	}
 };
 
@@ -293,7 +379,22 @@ struct EmitterTree
 	// This will recursively get 1 sample at each leaf node
 	// put the bary-coord of sample in baryCoords
 	// put the visibility in visibility 
-	void sample();
+	void sample(Sampler *sampler) 
+	{	
+		size_t oldIndex = samples.size();
+		root->sample(baryCoords, sampler, samples);
+		size_t newIndex = samples.size();
+
+		for (size_t i = oldIndex; i < newIndex; i++) {
+			// raytrace and update visibility.
+		}
+
+	}
+
+	void testSampling()
+	{
+		root->testSampling(baryCoords, samples);
+	}
 
 	// This will recursively go down to the leaf node and partition the leaf node if required.
 	bool partition() 
@@ -739,13 +840,19 @@ public:
 		
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
 			ppd.trees[i].partition();
-			ppd.trees[i].partition();
+			ppd.trees[i].sample(rRec.sampler);
+			//ppd.trees[i].sample(rRec.sampler);
+			//ppd.trees[i].sample(rRec.sampler);
+			ppd.trees[i].testSampling();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
+			//ppd.trees[i].partition();
 		}
 
 		const Scene *scene = rRec.scene;
