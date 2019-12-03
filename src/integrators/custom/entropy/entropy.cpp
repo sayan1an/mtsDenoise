@@ -169,16 +169,17 @@ struct EmitterNode
 	Float entropy; // compute this in computeEntropy, use neighbour pixels to compute
 	uint32_t nBlack; // find this in computeEntropy, use only current pixel values;
 	uint32_t nWhite; // find this in computeEntropy, use only current pixel values;
+#define ENTROPY_THRESHOLD 0.001f
 	
-	void sample(const std::vector<Point2> &baryCoords, Sampler *sampler, std::vector<Point2> &samples)
+	void sample(const std::vector<Point2> &baryCoords, Sampler *sampler, std::vector<Point2> &samples, const BaseEmitter *emitter, uint32_t maxSamples)
 	{	
 		// recurse to leaf node
 		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
 		if (allNullPtr == 0) {
 			// recurse to leaf node
-			nextNode[0]->sample(baryCoords, sampler, samples);
-			nextNode[1]->sample(baryCoords, sampler, samples);
-			nextNode[2]->sample(baryCoords, sampler, samples);
+			nextNode[0]->sample(baryCoords, sampler, samples, emitter, maxSamples);
+			nextNode[1]->sample(baryCoords, sampler, samples, emitter, maxSamples);
+			nextNode[2]->sample(baryCoords, sampler, samples, emitter, maxSamples);
 
 			return;
 		}
@@ -194,12 +195,33 @@ struct EmitterNode
 		const Point2 &a = baryCoords[idx[0]];
 		const Point2 &b = baryCoords[idx[1]];
 		const Point2 &c = baryCoords[idx[2]];
+		/*
+		for (int i = 0; i < maxSamples; i++) {
+			Point2f rSample = sampler->next2D();
+			Float sample1 = sqrt(rSample.x);
 
-		Point2f rSample = sampler->next2D();
-		Float sample1 = sqrt(rSample.x);
-	
-		samples.push_back(a * (1.0f - sample1) + b * sample1 * rSample.y +
-			c * sample1 * (1.0f - rSample.y));
+			samples.push_back(a * (1.0f - sample1) + b * sample1 * rSample.y +
+				c * sample1 * (1.0f - rSample.y));
+		}
+		*/
+		
+		// compute the vertices of the adaptive-trinagle in world space
+		const Point3 worldSpaceVertex0 = a.x * emitter->vertexPositions[0] + a.y * emitter->vertexPositions[1] + (1 - a.x - a.y) *  emitter->vertexPositions[2];
+		const Point3 worldSpaceVertex1 = b.x * emitter->vertexPositions[0] + b.y * emitter->vertexPositions[1] + (1 - b.x - b.y) *  emitter->vertexPositions[2];
+		const Point3 worldSpaceVertex2 = c.x * emitter->vertexPositions[0] + c.y * emitter->vertexPositions[1] + (1 - c.x - c.y) *  emitter->vertexPositions[2];
+
+		for (uint32_t i = 0; i < maxSamples; i++) {
+			Point2f rSample = sampler->next2D();
+			//std::cout << rSample.x << " " << rSample.y << std::endl;
+			Float sample1 = sqrt(rSample.x);
+
+			Point3 p = worldSpaceVertex0 * (1.0f - sample1)  + worldSpaceVertex1 * sample1 * rSample.y +
+				worldSpaceVertex2 * sample1 * (1.0f - rSample.y);
+
+			Point2f bary;
+			barycentric(p, emitter->vertexPositions[0], emitter->vertexPositions[1], emitter->vertexPositions[2], bary);
+			samples.push_back(bary);
+		}
 
 		sampled = true;
 	}
@@ -255,6 +277,8 @@ struct EmitterNode
 		}
 
 		// Check if there is need for partion based on entropy
+		if (entropy < ENTROPY_THRESHOLD)
+			return false;
 
 		// compute appropriate pivot location
 		const Point2 &a = baryCoords[idx[0]];
@@ -285,8 +309,12 @@ struct EmitterNode
 
 		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
 
-		if (allNullPtr == 3)
-			return analytic(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude);
+		if (allNullPtr == 3) {
+			if (nWhite == 0)
+				return Spectrum(0.0f);
+
+			return analytic(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude) * (static_cast<Float>(nWhite) / (nBlack + nWhite));
+		}
 		else if (allNullPtr > 0) {
 			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
 			return Spectrum(0.0f);
@@ -336,13 +364,53 @@ struct EmitterNode
 		return sum * emitter->radiance;
 	}
 	
-	void computeEntropy();
+	void computeEntropy(const std::vector<Point2> &baryCoords, const BaseEmitter *emitter, const std::vector<Point2> &samples, const std::vector<bool> &visibility)
+	{
+		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
+		if (allNullPtr == 0) {
+			// recurse to leaf node
+			nextNode[0]->computeEntropy(baryCoords, emitter, samples, visibility);
+			nextNode[1]->computeEntropy(baryCoords, emitter, samples, visibility);
+			nextNode[2]->computeEntropy(baryCoords, emitter, samples, visibility);
+			return;
+		}
+		else if (allNullPtr < 3) {
+			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
+			return;
+		}
+
+		const Point2 &a = baryCoords[idx[0]];
+		const Point2 &b = baryCoords[idx[1]];
+		const Point2 &c = baryCoords[idx[2]];
+		
+		nWhite = 0;
+		nBlack = 0;
+		uint32_t idx = 0;
+		for (const auto &sample : samples) {
+			if (pointInTriangle(sample, a, b, c)) {
+				nWhite += visibility[idx];
+				nBlack += (!visibility[idx]);
+			}
+			idx++;
+		}
+
+		if (nWhite == 0)
+			entropy = 0;
+		else if (nBlack == 0)
+			entropy = 0;
+		else {
+			float p = static_cast<Float>(nWhite) / (nWhite + nBlack);
+			entropy = p * std::log(1.0f / p) + (1.0f - p) * std::log(1.0f / (1.0f - p));
+		}
+	}
 	
 	EmitterNode(uint32_t i0, uint32_t i1, uint32_t i2)
 	{
 		idx[0] = i0;
 		idx[1] = i1;
 		idx[2] = i2;
+
+		entropy = std::numeric_limits<Float>::max();
 	}
 private:
 	static Float sign(const Point2f &p1, const Point2f &p2, const Point2f &p3)
@@ -364,14 +432,29 @@ private:
 
 		return !(has_neg && has_pos);
 	}
+
+	void barycentric(const Point &p, const Point &a, const Point &b, const Point &c, Point2f &bary)
+	{
+		Vector v0 = b - a, v1 = c - a, v2 = p - a;
+		float d00 = dot(v0, v0);
+		float d01 = dot(v0, v1);
+		float d11 = dot(v1, v1);
+		float d20 = dot(v2, v0);
+		float d21 = dot(v2, v1);
+		float denom = d00 * d11 - d01 * d01;
+		bary.y = (d11 * d20 - d01 * d21) / denom;
+		float t = (d00 * d21 - d01 * d20) / denom;
+		bary.x = 1.0f - bary.y - t;
+	}
+#undef ENTROPY_THRESHOLD
 };
 
 struct EmitterTree
 {	
 	const BaseEmitter *baseEmitter = nullptr;
-	std::vector<Point2> baryCoords; // pivot points for partitioning
+	std::vector<Point2f> baryCoords; // pivot points for partitioning
 	// Next two are sample visibility pairs
-	std::vector<Point2> samples; // samples stored as barycentric coords
+	std::vector<Point2f> samples; // samples stored as barycentric coords
 	std::vector<bool> visibility; // true == visible
 
 	EmitterNode *root = nullptr;
@@ -379,18 +462,22 @@ struct EmitterTree
 	// This will recursively get 1 sample at each leaf node
 	// put the bary-coord of sample in baryCoords
 	// put the visibility in visibility 
-	void sample(Sampler *sampler, const Normal &reciverNormal, const Point3 &reciverPos) 
+	void sample(const Scene *scene, Sampler *sampler, const Normal &reciverNormal, const Point3 &reciverPos, uint32_t maxSamples = 1) 
 	{	
 		size_t oldIndex = samples.size();
-		root->sample(baryCoords, sampler, samples);
+		root->sample(baryCoords, sampler, samples, baseEmitter, maxSamples);
 		size_t newIndex = samples.size();
 
 		for (size_t i = oldIndex; i < newIndex; i++) {
 			// raytrace and update visibility.
 			// convert the light-samples from triangle-space to world space
-			const Point2 &baryCord = baryCoords[i];
-			Point3 worldSpacePosition = baryCord.x * baseEmitter->vertexPositions[0] + baryCord.y * baseEmitter->vertexPositions[1] + (1 - baryCord.x - baryCord.y) *  baseEmitter->vertexPositions[2];
+			const Point2f &baryCord = samples[i];
+			Point3 worldSpacePosition = baryCord.x * baseEmitter->vertexPositions[0] + 
+				baryCord.y * baseEmitter->vertexPositions[1] + 
+				(1 - baryCord.x - baryCord.y) *  baseEmitter->vertexPositions[2];
+
 			Vector direction = worldSpacePosition - reciverPos;
+
 			if (dot(reciverNormal, direction) < 0) {
 				visibility.push_back(false);
 				continue;
@@ -402,17 +489,22 @@ struct EmitterTree
 			RayDifferential shadowRay(reciverPos, direction, 0);
 			shadowRay.mint = Epsilon;
 			shadowRay.maxt = length * (1 - ShadowEpsilon);
-			/*
-			 if (!rRec.scene->rayIntersect(shadowRay))
+			
+			if (scene->rayIntersect(shadowRay))
+				visibility.push_back(false);
+			else
 				visibility.push_back(true);
-			*/
 		}
-
 	}
 
 	void testSampling()
 	{
 		root->testSampling(baryCoords, samples);
+	}
+
+	void computeEntropy()
+	{
+		root->computeEntropy(baryCoords, baseEmitter, samples, visibility);
 	}
 
 	// This will recursively go down to the leaf node and partition the leaf node if required.
@@ -716,8 +808,8 @@ public:
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 			sampler->generate(Point2i(i, j));
-
 			shadeAnalytic(rRec, gBuffer[pixelID], perPixelData[pixelID]);
+			sampler->advance();
 		});
 
 		//gBufferToImage(result, gBuffer, cropSize);
@@ -761,8 +853,8 @@ public:
 				for (uint32_t i = 0; i < triMesh->getTriangleCount(); i++) 
 				{
 					emitters[numEmitters].vertexPositions[0] = vertexPositions[triangles[i].idx[2]];
-					emitters[numEmitters].vertexPositions[1] = vertexPositions[triangles[i].idx[0]];
-					emitters[numEmitters].vertexPositions[2] = vertexPositions[triangles[i].idx[1]];
+					emitters[numEmitters].vertexPositions[1] = vertexPositions[triangles[i].idx[1]];
+					emitters[numEmitters].vertexPositions[2] = vertexPositions[triangles[i].idx[0]];
 					emitters[numEmitters].radiance = emitter->getRadiance();
 					numEmitters++;
 				}
@@ -856,15 +948,38 @@ public:
 			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
-		
+		const Scene *scene = rRec.scene;
 		for (uint32_t i = 0; i < emitterCount; i++) {
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, 10);
+			ppd.trees[i].computeEntropy();
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].computeEntropy();
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].computeEntropy();
+			ppd.trees[i].partition();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].computeEntropy();
+			ppd.trees[i].partition();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].computeEntropy();
+			ppd.trees[i].partition();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].computeEntropy();
+			ppd.trees[i].partition();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].computeEntropy();
+			ppd.trees[i].partition();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].computeEntropy();
+			ppd.trees[i].partition();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
+			ppd.trees[i].computeEntropy();
 			//ppd.trees[i].sample(rRec.sampler);
 			//ppd.trees[i].sample(rRec.sampler);
-			ppd.trees[i].testSampling();
+			//ppd.trees[i].testSampling();
+			//ppd.trees[i].computeEntropy();
 			//ppd.trees[i].partition();
 			//ppd.trees[i].partition();
 			//ppd.trees[i].partition();
@@ -874,11 +989,7 @@ public:
 			//ppd.trees[i].partition();
 			//ppd.trees[i].partition();
 		}
-
-		const Scene *scene = rRec.scene;
-		DirectSamplingRecord dRec(*prd.its);
-		Intersection its;
-
+				
 		Matrix3x3 ltcW2l = GET_MAT3x3_IDENTITY;
 		Float amplitude = 1.0f;
 		Float ltcW2lDet = 1.0f;
@@ -892,6 +1003,14 @@ public:
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, rotMat, diffuseComponent, specularComponent);
 		}
+
+		//for (uint32_t i = 0; i < emitterCount; i++) {
+			//for (const auto & v : ppd.trees[i].visibility)
+				//ppd.colorShaded[i] += Spectrum(v);
+
+			//ppd.colorShaded[i] /= (ppd.trees[i].visibility.size() > 0 ? 10 * ppd.trees[i].visibility.size() : 1);
+		//}
+
 	
 	}
 
