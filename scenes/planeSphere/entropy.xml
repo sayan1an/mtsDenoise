@@ -2,6 +2,12 @@
 
 <scene version="0.6.0" >
 	<integrator type="entropy"></integrator>
+	<!--
+	<integrator type="direct">
+		<integer name="emitterSamples" value="10"/>
+		<integer name="bsdfSamples" value="0"/>
+	</integrator>
+	-->
 	<sensor type="perspective" >
 		<float name="fov" value="60" />
 		<transform name="toWorld" >

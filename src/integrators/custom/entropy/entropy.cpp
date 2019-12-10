@@ -149,7 +149,7 @@ private:
     ref<Mutex> mutex;
 };
 
-static StatsCounter avgPathLength("Path tracer", "Average path length", EAverage);
+struct EmitterTree;
 
 struct BaseEmitter
 {
@@ -195,18 +195,17 @@ struct EmitterNode
 		const Point2 &a = baryCoords[idx[0]];
 		const Point2 &b = baryCoords[idx[1]];
 		const Point2 &c = baryCoords[idx[2]];
-		/*
-		for (int i = 0; i < maxSamples; i++) {
+		
+		for (uint32_t i = 0; i < maxSamples; i++) {
 			Point2f rSample = sampler->next2D();
 			Float sample1 = sqrt(rSample.x);
 
 			samples.push_back(a * (1.0f - sample1) + b * sample1 * rSample.y +
 				c * sample1 * (1.0f - rSample.y));
 		}
-		*/
-		
+				
 		// compute the vertices of the adaptive-trinagle in world space
-		const Point3 worldSpaceVertex0 = a.x * emitter->vertexPositions[0] + a.y * emitter->vertexPositions[1] + (1 - a.x - a.y) *  emitter->vertexPositions[2];
+		/*const Point3 worldSpaceVertex0 = a.x * emitter->vertexPositions[0] + a.y * emitter->vertexPositions[1] + (1 - a.x - a.y) *  emitter->vertexPositions[2];
 		const Point3 worldSpaceVertex1 = b.x * emitter->vertexPositions[0] + b.y * emitter->vertexPositions[1] + (1 - b.x - b.y) *  emitter->vertexPositions[2];
 		const Point3 worldSpaceVertex2 = c.x * emitter->vertexPositions[0] + c.y * emitter->vertexPositions[1] + (1 - c.x - c.y) *  emitter->vertexPositions[2];
 
@@ -221,7 +220,7 @@ struct EmitterNode
 			Point2f bary;
 			barycentric(p, emitter->vertexPositions[0], emitter->vertexPositions[1], emitter->vertexPositions[2], bary);
 			samples.push_back(bary);
-		}
+		}*/
 
 		sampled = true;
 	}
@@ -363,47 +362,8 @@ struct EmitterNode
 
 		return sum * emitter->radiance;
 	}
-	
-	void computeEntropy(const std::vector<Point2> &baryCoords, const BaseEmitter *emitter, const std::vector<Point2> &samples, const std::vector<bool> &visibility)
-	{
-		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
-		if (allNullPtr == 0) {
-			// recurse to leaf node
-			nextNode[0]->computeEntropy(baryCoords, emitter, samples, visibility);
-			nextNode[1]->computeEntropy(baryCoords, emitter, samples, visibility);
-			nextNode[2]->computeEntropy(baryCoords, emitter, samples, visibility);
-			return;
-		}
-		else if (allNullPtr < 3) {
-			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
-			return;
-		}
+	void computeEntropy(const std::vector<Point2> &baryCoords, const BaseEmitter *emitter, const std::vector<Point2> &samples, const std::vector<bool> &visibility, float &entropyVis, const std::vector<const EmitterTree *> &neightbourSamples);
 
-		const Point2 &a = baryCoords[idx[0]];
-		const Point2 &b = baryCoords[idx[1]];
-		const Point2 &c = baryCoords[idx[2]];
-		
-		nWhite = 0;
-		nBlack = 0;
-		uint32_t idx = 0;
-		for (const auto &sample : samples) {
-			if (pointInTriangle(sample, a, b, c)) {
-				nWhite += visibility[idx];
-				nBlack += (!visibility[idx]);
-			}
-			idx++;
-		}
-
-		if (nWhite == 0)
-			entropy = 0;
-		else if (nBlack == 0)
-			entropy = 0;
-		else {
-			float p = static_cast<Float>(nWhite) / (nWhite + nBlack);
-			entropy = p * std::log(1.0f / p) + (1.0f - p) * std::log(1.0f / (1.0f - p));
-		}
-	}
-	
 	EmitterNode(uint32_t i0, uint32_t i1, uint32_t i2)
 	{
 		idx[0] = i0;
@@ -462,11 +422,13 @@ struct EmitterTree
 	// This will recursively get 1 sample at each leaf node
 	// put the bary-coord of sample in baryCoords
 	// put the visibility in visibility 
-	void sample(const Scene *scene, Sampler *sampler, const Normal &reciverNormal, const Point3 &reciverPos, uint32_t maxSamples = 1) 
+	void sample(const Scene *scene, Sampler *sampler, const Normal &reciverNormal, const Point3 &reciverPos, uint32_t &samplesUsed, uint32_t maxSamples = 1)
 	{	
 		size_t oldIndex = samples.size();
 		root->sample(baryCoords, sampler, samples, baseEmitter, maxSamples);
 		size_t newIndex = samples.size();
+
+		samplesUsed = static_cast<uint32_t>(newIndex - oldIndex);
 
 		for (size_t i = oldIndex; i < newIndex; i++) {
 			// raytrace and update visibility.
@@ -502,9 +464,9 @@ struct EmitterTree
 		root->testSampling(baryCoords, samples);
 	}
 
-	void computeEntropy()
+	void computeEntropy(float &entropy, const std::vector<const EmitterTree *> &neightbourSamples = std::vector<const EmitterTree *>())
 	{
-		root->computeEntropy(baryCoords, baseEmitter, samples, visibility);
+		root->computeEntropy(baryCoords, baseEmitter, samples, visibility, entropy, neightbourSamples);
 	}
 
 	// This will recursively go down to the leaf node and partition the leaf node if required.
@@ -532,6 +494,61 @@ struct EmitterTree
 		root = new EmitterNode(0, 1, 2);
 	}
 };
+
+void EmitterNode::computeEntropy(const std::vector<Point2> &baryCoords, const BaseEmitter *emitter, const std::vector<Point2> &samples, const std::vector<bool> &visibility, float &entropyVis, const std::vector<const EmitterTree *> &neightbourSamples)
+{
+	uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
+	if (allNullPtr == 0) {
+		// recurse to leaf node
+		nextNode[0]->computeEntropy(baryCoords, emitter, samples, visibility, entropyVis, neightbourSamples);
+		nextNode[1]->computeEntropy(baryCoords, emitter, samples, visibility, entropyVis, neightbourSamples);
+		nextNode[2]->computeEntropy(baryCoords, emitter, samples, visibility, entropyVis, neightbourSamples);
+		return;
+	}
+	else if (allNullPtr < 3) {
+		std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
+		return;
+	}
+
+	const Point2 &a = baryCoords[idx[0]];
+	const Point2 &b = baryCoords[idx[1]];
+	const Point2 &c = baryCoords[idx[2]];
+
+	nWhite = 0;
+	nBlack = 0;
+	uint32_t idx = 0;
+	for (const auto &sample : samples) {
+		if (pointInTriangle(sample, a, b, c)) {
+			nWhite += visibility[idx];
+			nBlack += (!visibility[idx]);
+		}
+		idx++;
+	}
+
+	uint32_t nWhiteNeighbour = 0;
+	uint32_t nBlackNeighbour = 0;
+	for (const EmitterTree *root : neightbourSamples) {
+		uint32_t idx = 0;
+		for (const Point2f &sample : root->samples) {
+			if (pointInTriangle(sample, a, b, c)) {
+				nWhiteNeighbour += root->visibility[idx];
+				nBlackNeighbour += (!(root->visibility[idx]));
+			}
+			idx++;
+		}
+	}
+
+	if (nWhite + nWhiteNeighbour == 0)
+		entropy = 0;
+	else if (nBlack + nBlackNeighbour == 0)
+		entropy = 0;
+	else {
+		float p = static_cast<Float>(nWhite + nWhiteNeighbour) / (nWhite + nBlack + nWhiteNeighbour + nBlackNeighbour);
+		entropy = p * std::log(1.0f / p) + (1.0f - p) * std::log(1.0f / (1.0f - p));
+	}
+
+	entropyVis += entropy;// static_cast<Float>(nWhite) / (nWhite + nBlack);
+}
 
 /*
 struct TriangleEmitters
@@ -684,6 +701,8 @@ struct PerPixelData
 	EmitterTree *trees = nullptr;
 	Spectrum colorDirect;
 	Spectrum *colorShaded;
+	uint32_t samplesUsed; // For visualization only
+	float entropy; // For visualization only
 
 	void init(const BaseEmitter *emitters, const uint32_t numEmitters)
 	{
@@ -694,7 +713,8 @@ struct PerPixelData
 			trees[i].init(&emitters[i]);
 			colorShaded[i] = Spectrum(0.0f);
 		}
-
+		samplesUsed = 0;
+		entropy = 0;
 		colorDirect = Spectrum(0.0f);
 	}
 };
@@ -808,10 +828,58 @@ public:
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 			sampler->generate(Point2i(i, j));
-			shadeAnalytic(rRec, gBuffer[pixelID], perPixelData[pixelID]);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 1);
 			sampler->advance();
 		});
 
+		std::cout << "Finished initial sampling pass." << std::endl;
+
+		runPool.run([&](int pixelID, int threadID) {
+			int i = pixelID % cropSize.x;
+			int j = pixelID / cropSize.x;
+		
+			std::vector<const EmitterTree *> tree;
+			tree.reserve(8);
+			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree);
+		});
+
+		runPool.run([&](int pixelID, int threadID) {
+			ThreadData &td = threadData[threadID];
+			auto sampler = td.sampler.get();
+			RadianceQueryRecord rRec(scene, sampler);
+
+			int i = pixelID % cropSize.x;
+			int j = pixelID / cropSize.x;
+			sampler->generate(Point2i(i, j));
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 1);
+			sampler->advance();
+			
+		});
+
+		runPool.run([&](int pixelID, int threadID) {
+			int i = pixelID % cropSize.x;
+			int j = pixelID / cropSize.x;
+
+			std::vector<const EmitterTree *> tree;
+			tree.reserve(8);
+			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 2);
+		});
+
+		runPool.run([&](int pixelID, int threadID) {
+			ThreadData &td = threadData[threadID];
+			auto sampler = td.sampler.get();
+			RadianceQueryRecord rRec(scene, sampler);
+
+			int i = pixelID % cropSize.x;
+			int j = pixelID / cropSize.x;
+			sampler->generate(Point2i(i, j));
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 1);
+			shadeAnalytic(gBuffer[pixelID], perPixelData[pixelID]);
+			sampler->advance();
+
+		});
+
+		
 		//gBufferToImage(result, gBuffer, cropSize);
 		pBufferToImage(result, perPixelData, cropSize);
 		film->setBitmap(result);
@@ -886,61 +954,93 @@ public:
 		prd.objectId = 0;
     }
 
-	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize)
+	void sample(RadianceQueryRecord &rRec, PrimaryRayData &prd, PerPixelData &ppd, uint32_t nSamples = 1)
 	{
-		Spectrum *throughputPix = (Spectrum *)result->getData();
+		if (prd.objectId < 0)
+			return;
 
-		for (size_t j = 0; j < cropSize.y; j++)
-			for (size_t i = 0; i < cropSize.x; i++) {
-				size_t currPix = j * cropSize.x + i;
-				const PerPixelData &pData = pBuffer[currPix];
-				throughputPix[currPix] = Spectrum(0.0f);
-				throughputPix[currPix] = pData.colorDirect;
+		const Scene *scene = rRec.scene;
+		for (uint32_t i = 0; i < emitterCount; i++) {
+			uint32_t samplesUsed = 0;
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, samplesUsed, nSamples);
+		}
+	}
+	
+	void computeEntropyCooperative(PrimaryRayData &prd, PerPixelData *ppd, int i, int j, const Vector2i &cropSize, std::vector<const EmitterTree *> &neighbours, uint32_t partionDepth = 1)
+	{
+		if (prd.objectId < 0)
+			return; 
+				
+		for (uint32_t k = 0; k < emitterCount; k++) {
+			neighbours.clear();
 
-				// for unblurred results
-				for (uint32_t k = 0; k < emitterCount; k++) {
-					throughputPix[currPix] += pData.colorShaded[k];
-				}
-
-				// For blurred results
-				//for (uint32_t k = 0; k < nEmitters; k++) {
-				//throughputPix[currPix] += pData.colorEmitterBlur[k];
-				//}
-
-				// Visualize d1
-				// throughputPix[currPix] = Spectrum(pData.d1[0] / 200);
-
-				// Visualize d2Max
-				//throughputPix[currPix] = Spectrum(pData.d2Max[0]);
-
-				// Visualize d2Min
-				//if (pData.d2Min[0] < std::numeric_limits<Float>::max())
-				//throughputPix[currPix] = Spectrum(pData.d2Min[0] / 200);
-
-				// Visualize numAdaptiveSamples
-				//for (uint32_t k = 0; k < emitterCount; k++)
-				//throughputPix[currPix] += Spectrum(pData.totalNumShadowSample[k]);
-				//throughputPix[currPix] /= nEmitters;
-				//throughputPix[currPix] /= (nEmitterSamples + maxAdaptiveSamples);
-
-				// visualize beta
-				//for (uint32_t k = 0; k < nEmitters; k++)
-				//throughputPix[currPix] += Spectrum(pData.beta[k]);
-				//throughputPix[currPix] /= nEmitters;
-				//throughputPix[currPix] /= (maxFilterWidth);
-
-				// visualize depth
-				//throughputPix[currPix] = Spectrum(pData.depth / 1000);
-
-				// Visualize pixel footprint size
-				//if (pData.omegaMaxPix > 0)
-				//throughputPix[currPix] = Spectrum(1 / pData.omegaMaxPix);
-				//else
-				//throughputPix[currPix] = Spectrum(0.0f);
+			if (i + 1 < cropSize.x) {
+				int pixelID = j * cropSize.x + i + 1;
+				neighbours.push_back(&ppd[pixelID].trees[k]);
 			}
+			if (i - 1 >= 0) {
+				int pixelID = j * cropSize.x + i - 1;
+				neighbours.push_back(&ppd[pixelID].trees[k]);
+			}
+			if (j + 1 < cropSize.y) {
+				int pixelID = (j + 1) * cropSize.x + i;
+				neighbours.push_back(&ppd[pixelID].trees[k]);
+
+				if (i - 1 >= 0)
+					neighbours.push_back(&ppd[pixelID - 1].trees[k]);
+				if (i + 1 < cropSize.x)
+					neighbours.push_back(&ppd[pixelID + 1].trees[k]);
+			}
+			if (j - 1 >= 0) {
+				int pixelID = (j - 1) * cropSize.x + i;
+				neighbours.push_back(&ppd[pixelID].trees[k]);
+				
+				if (i - 1 >= 0)
+					neighbours.push_back(&ppd[pixelID - 1].trees[k]);
+				if (i + 1 < cropSize.x)
+					neighbours.push_back(&ppd[pixelID + 1].trees[k]);
+			}
+
+			float entropy = 0;
+			int pixelID = j * cropSize.x + i;
+			ppd[pixelID].trees[k].computeEntropy(entropy, neighbours);
+
+			for (uint32_t p = 0; p < partionDepth; p++)
+				ppd[pixelID].trees[k].partition();
+			//ppd[pixelID].trees[k].partition();
+			//ppd[pixelID].entropy += entropy;
+		}
 	}
 
-	void shadeAnalytic(RadianceQueryRecord &rRec, PrimaryRayData &prd, PerPixelData &ppd)
+
+
+	void shadeAnalytic(PrimaryRayData &prd, PerPixelData &ppd)
+	{
+		if (prd.objectId == -2)
+			return;
+		else if (prd.objectId == -1) {
+			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
+			return;
+		}
+	
+		Matrix3x3 ltcW2l = GET_MAT3x3_IDENTITY;
+		Float amplitude = 1.0f;
+		Float ltcW2lDet = 1.0f;
+		Matrix3x3 rotMat = GET_MAT3x3_IDENTITY;
+		Spectrum diffuseComponent(0.0f);
+		Spectrum specularComponent(0.0f);
+
+		if (!getMatrices(prd, rotMat, ltcW2l, ltcW2lDet, amplitude, diffuseComponent, specularComponent))
+			return;
+
+		for (uint32_t i = 0; i < emitterCount; i++) {
+			float entropy = 0;
+			ppd.trees[i].computeEntropy(entropy);
+			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, rotMat, diffuseComponent, specularComponent);
+			ppd.entropy += entropy;
+		}
+	}
+	void shadeAnalyticTester(RadianceQueryRecord &rRec, PrimaryRayData &prd, PerPixelData &ppd)
 	{
 		if (prd.objectId == -2)
 			return;
@@ -949,46 +1049,47 @@ public:
 			return;
 		}
 		const Scene *scene = rRec.scene;
-		for (uint32_t i = 0; i < emitterCount; i++) {
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, 10);
-			ppd.trees[i].computeEntropy();
+		
+		/*for (uint32_t i = 0; i < emitterCount; i++) {
+			uint32_t samplesUsed = 0;
+			float entropy = 0;
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, samplesUsed, 9);
+			ppd.trees[i].computeEntropy(entropy);
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
-			ppd.trees[i].computeEntropy();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, ppd.samplesUsed);
+			entropy = 0;
+			ppd.trees[i].computeEntropy(entropy);
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
-			ppd.trees[i].computeEntropy();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, ppd.samplesUsed);
+			entropy = 0;
+			ppd.trees[i].computeEntropy(entropy);
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
-			ppd.trees[i].computeEntropy();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, ppd.samplesUsed);
+			entropy = 0;
+			ppd.trees[i].computeEntropy(entropy);
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
-			ppd.trees[i].computeEntropy();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, ppd.samplesUsed);
+			entropy = 0;
+			ppd.trees[i].computeEntropy(entropy);
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
-			ppd.trees[i].computeEntropy();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, ppd.samplesUsed);
+			entropy = 0;
+			ppd.trees[i].computeEntropy(entropy);
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
-			ppd.trees[i].computeEntropy();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, ppd.samplesUsed);
+			entropy = 0;
+			ppd.trees[i].computeEntropy(entropy);
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
-			ppd.trees[i].computeEntropy();
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, ppd.samplesUsed);
+			entropy = 0;
+			ppd.trees[i].computeEntropy(entropy);
 			ppd.trees[i].partition();
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p);
-			ppd.trees[i].computeEntropy();
-			//ppd.trees[i].sample(rRec.sampler);
-			//ppd.trees[i].sample(rRec.sampler);
-			//ppd.trees[i].testSampling();
-			//ppd.trees[i].computeEntropy();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-			//ppd.trees[i].partition();
-		}
+			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, ppd.samplesUsed);
+			entropy = 0;
+			ppd.trees[i].computeEntropy(entropy);
+			ppd.entropy += entropy;
+			ppd.samplesUsed += samplesUsed;
+		}*/
 				
 		Matrix3x3 ltcW2l = GET_MAT3x3_IDENTITY;
 		Float amplitude = 1.0f;
@@ -1003,15 +1104,6 @@ public:
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, rotMat, diffuseComponent, specularComponent);
 		}
-
-		//for (uint32_t i = 0; i < emitterCount; i++) {
-			//for (const auto & v : ppd.trees[i].visibility)
-				//ppd.colorShaded[i] += Spectrum(v);
-
-			//ppd.colorShaded[i] /= (ppd.trees[i].visibility.size() > 0 ? 10 * ppd.trees[i].visibility.size() : 1);
-		//}
-
-	
 	}
 
 	bool getMatrices(const PrimaryRayData &prd, Matrix3x3 &rotMat, Matrix3x3 &ltcW2l, Float &ltcW2lDet, Float &amplitude, Spectrum &diffuseComponent, Spectrum &specularComponent)
@@ -1036,6 +1128,26 @@ public:
 		}
 
 		return true;
+	}
+
+	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize)
+	{
+		Spectrum *throughputPix = (Spectrum *)result->getData();
+
+		for (size_t j = 0; j < cropSize.y; j++)
+			for (size_t i = 0; i < cropSize.x; i++) {
+				size_t currPix = j * cropSize.x + i;
+				const PerPixelData &pData = pBuffer[currPix];
+				throughputPix[currPix] = Spectrum(0.0f);
+				throughputPix[currPix] = pData.colorDirect;
+
+				// for unblurred results
+				for (uint32_t k = 0; k < emitterCount; k++) {
+					throughputPix[currPix] += pData.colorShaded[k];
+				}
+				//throughputPix[currPix] = Spectrum(pData.samplesUsed / (emitterCount * 20.0f));
+				//throughputPix[currPix] = Spectrum(pData.entropy / (emitterCount * 50));
+			}
 	}
    
 	void gBufferToImage(ref<Bitmap> &result, const PrimaryRayData *gBuffer, const Vector2i &cropSize) 
