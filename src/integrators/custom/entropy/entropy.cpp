@@ -25,6 +25,7 @@
 #include <functional>
 #include <algorithm>
 #include <thread>
+#include <fstream>
 
 #include <mitsuba/core/lock.h>
 #include <mitsuba/core/thread.h>
@@ -362,6 +363,46 @@ struct EmitterNode
 
 		return sum * emitter->radiance;
 	}
+
+	void dumpToFile(std::ofstream &file)
+	{
+		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
+
+		if (allNullPtr == 3) {
+			file << idx[0] << " " << idx[1] << " " << idx[2] << std::endl;
+		}
+		else if (allNullPtr > 0) {
+			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
+			return;
+		}
+		else {
+			nextNode[0]->dumpToFile(file);
+			nextNode[1]->dumpToFile(file);
+			nextNode[2]->dumpToFile(file);
+		}
+	}
+
+	void getNumLeafNodes(uint32_t &nLeaf, uint32_t &maxDepth, uint32_t maxDepthTemp)
+	{
+		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
+
+		if (allNullPtr == 3) {
+			nLeaf++;
+			if (maxDepth < maxDepthTemp)
+				maxDepth = maxDepthTemp;
+		}
+		else if (allNullPtr > 0) {
+			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
+			return;
+		}
+		else {
+			maxDepthTemp++;
+			nextNode[0]->getNumLeafNodes(nLeaf, maxDepth, maxDepthTemp);
+			nextNode[0]->getNumLeafNodes(nLeaf, maxDepth, maxDepthTemp);
+			nextNode[0]->getNumLeafNodes(nLeaf, maxDepth, maxDepthTemp);
+		}
+	}
+
 	void computeEntropy(const std::vector<Point2> &baryCoords, const BaseEmitter *emitter, const std::vector<Point2> &samples, const std::vector<bool> &visibility, float &entropyVis, const std::vector<const EmitterTree *> &neightbourSamples);
 
 	EmitterNode(uint32_t i0, uint32_t i1, uint32_t i2)
@@ -492,6 +533,33 @@ struct EmitterTree
 		baryCoords.push_back(Point2(0, 1));
 		baryCoords.push_back(Point2(0, 0));
 		root = new EmitterNode(0, 1, 2);
+	}
+
+	void dumpToFile(std::string fileName) 
+	{	
+		Point2f v0 = Point2f(0, static_cast<Float>(std::sqrt(3))), v1 = Point2f(-1, 0), v2 = Point2f(0, 1);
+		std::ofstream file;
+		file.open(fileName);
+		
+		file << baryCoords.size() << std::endl;
+		for (const auto &bary : baryCoords) {
+			Point2f p = v0 * bary.x + v1 * bary.y + v2 * (1 - bary.x - bary.y);
+			file << p.x << " " << p.y << std::endl;
+		}
+		uint32_t nTriangles = 0, maxDepth = 0;
+		root->getNumLeafNodes(nTriangles, maxDepth, 0);
+		file << nTriangles << std::endl;
+		root->dumpToFile(file);
+
+		file << samples.size() << std::endl;
+		uint32_t idx = 0;
+		for (const auto sample : samples) {
+			Point2f p = v0 * sample.x + v1 * sample.y + v2 * (1 - sample.x - sample.y);
+			bool v = visibility[idx++];
+			file << p.x << " " << p.y << " " << v << std::endl;
+		}
+
+		file.close();
 	}
 };
 
