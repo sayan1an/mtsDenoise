@@ -4,7 +4,7 @@
 	<integrator type="entropy"></integrator>
 	<!--
 	<integrator type="direct">
-		<integer name="emitterSamples" value="10"/>
+		<integer name="emitterSamples" value="150"/>
 		<integer name="bsdfSamples" value="0"/>
 	</integrator>
 	-->

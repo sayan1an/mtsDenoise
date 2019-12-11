@@ -169,7 +169,7 @@ struct EmitterNode
 	Float entropy; // compute this in computeEntropy, use neighbour pixels to compute
 	uint32_t nBlack; // find this in computeEntropy, use only current pixel values;
 	uint32_t nWhite; // find this in computeEntropy, use only current pixel values;
-#define ENTROPY_THRESHOLD 0.001f
+#define ENTROPY_THRESHOLD 0.4f
 	
 	void sample(const std::vector<Point2> &baryCoords, Sampler *sampler, std::vector<Point2> &samples, const BaseEmitter *emitter, uint32_t maxSamples)
 	{	
@@ -544,149 +544,11 @@ void EmitterNode::computeEntropy(const std::vector<Point2> &baryCoords, const Ba
 		entropy = 0;
 	else {
 		float p = static_cast<Float>(nWhite + nWhiteNeighbour) / (nWhite + nBlack + nWhiteNeighbour + nBlackNeighbour);
-		entropy = p * std::log(1.0f / p) + (1.0f - p) * std::log(1.0f / (1.0f - p));
+		entropy = p * std::log2(1.0f / p) + (1.0f - p) * std::log2(1.0f / (1.0f - p));
 	}
 
 	entropyVis += entropy;// static_cast<Float>(nWhite) / (nWhite + nBlack);
 }
-
-/*
-struct TriangleEmitters
-{
-	uint32_t idx[3];
-	const Point *vertexPositions; // pointer to world positions
-	
-	void init(const Point *vertices, uint32_t i0, uint32_t i1, uint32_t i2)
-	{
-		vertexPositions = vertices;
-		idx[0] = i0;
-		idx[1] = i1;
-		idx[2] = i2;
-	}
-
-	 Normal computeAreaNormal(Float &area, const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY) const
-	 {	
-		 const Point p0 = Point(w2l * Vector(vertexPositions[idx[0]]));
-		 const Point p1 = Point(w2l * Vector(vertexPositions[idx[1]]));
-		 const Point p2 = Point(w2l * Vector(vertexPositions[idx[2]]));
-
-		 return computeAreaNormal(area, p0, p1, p2);
-	 }
-
-	 Spectrum getAnalytic(const Point &ref, const Matrix3x3 &rotMat, const Matrix3x3 &ltcW2l, const Float amplitude, const Spectrum &diffuseComponent, const Spectrum &specularComponent)
-	 {	
-		 Spectrum sum(0.0f);
-
-		 Vector e0 = rotMat * (vertexPositions[idx[2]] - ref);
-		 Vector e1 = rotMat * (vertexPositions[idx[1]] - ref);
-		 Vector e2 = rotMat * (vertexPositions[idx[0]] - ref);
-
-		 Float result = Analytic::integrate(e0, e1, e2);
-
-		 // Note that each triangle is considered a light source, hence we apply single sided or double sided processing here.
-		 if (true) // One sided light source
-			 result = result > 0.0f ? result : 0.0f;
-		 else // double sided light source
-			 result = std::abs(result);
-
-		 sum = diffuseComponent * result * 0.5f * INV_PI;
-
-		 e0 = ltcW2l * e0;
-		 e1 = ltcW2l * e1;
-		 e2 = ltcW2l * e2;
-
-		 result = Analytic::integrate(e0, e1, e2);
-		
-		 if (true) // One sided light source
-			 result = result > 0.0f ? result : 0.0f;
-		 else // double sided light source
-			 result = std::abs(result);
-
-		 sum += specularComponent * result * amplitude * 0.5f * INV_PI;
-
-		 return sum;
-	 }
-		
-	 // return pdf in solid angle
-	 // sample in local space
-	 // multiply the pdf with appropriate jacobian
-	 Float sample(Point &p, Point2f &sample, const Point &ref = Point(0.0f), 
-			const Matrix3x3 &w2l = GET_MAT3x3_IDENTITY,
-			Float w2lDet = 1.0f,
-			const Matrix3x3 &l2w = GET_MAT3x3_IDENTITY) const
-	 {	
-		 const Point p0 = Point(w2l * (vertexPositions[idx[0]] - ref));
-		 const Point p1 = Point(w2l * (vertexPositions[idx[1]] - ref));
-		 const Point p2 = Point(w2l * (vertexPositions[idx[2]] - ref));
-
-		 Float sample1 = sqrt(sample.x);
-	
-		 Vector directionLocal = Vector(p0 * (1.0f - sample1) + p1 * sample1 * sample.y +
-			 p2 * sample1 * (1.0f - sample.y));
-		 
-		 Vector directionWorld = l2w * directionLocal;
-		 p = Point(directionWorld) + ref;
-		 
-		 // Note that we are not doing rejection sampling
-		 // To do rejection sampling, if the triangle goes below horizon in local space, it must be clipped and the area/pdfNorm must be adjusted. Also we cannot have a sample below the horizon.
-		 // Since we are not doing rejection sampling, if a direction is below the horizon in local space, it'll evaluate to zero when computing the brdf anyway, 
-         // so we can return a zero pdf, even though the pdf is non-zero.
-		 //if (directionLocal.z <= Epsilon)
-			 //return 0.0f;
-		 
-		 directionWorld /= directionWorld.length();
-		 
-		 // compute pdf in local space
-		 Float pdfLocal = 0;
-		 {	
-			 Float area = 0;
-			 Normal nLocal = computeAreaNormal(area, p0, p1, p2);
-
-			 Float dist = directionLocal.length();
-
-			 directionLocal /= dist;
-
-			 Float cosineFactor = -dot(directionLocal, nLocal);
-			 if (cosineFactor <= Epsilon)
-				 return 0.0f;
-
-			 pdfLocal = dist * dist / (area * cosineFactor);
-		 }
-
-		 // compute the jacobian
-		 Float jacobian = 1.0;
-		 {
-			 Vector w = w2l * directionWorld;
-			 Float length = w.length();
-			 jacobian = w2lDet / (length * length * length);
-		 }
-		 
-		 return pdfLocal * jacobian;
-	 }
- private:
-	 // compute area and normal
-	Normal computeAreaNormal(Float &area, const Point &p0, const Point &p1, const Point &p2) const
-	{
-		Normal n = cross(p1 - p0, p2 - p0);
-		area = n.length();
-		n /= area;
-		area *= 0.5f;
-
-		return n;
-	}
-};
-
-struct EmitterSampler
- {
- public:
-	 uint32_t triangleCount;
-	 uint32_t vertexCount;
-	 const Point *vertexPositions; // pointer to world positions
-	 Spectrum radiance;
-
-	 TriangleEmitters *triangleEmitters;
- };
- */
 
 struct PrimaryRayData 
 {
@@ -703,6 +565,7 @@ struct PerPixelData
 	Spectrum *colorShaded;
 	uint32_t samplesUsed; // For visualization only
 	float entropy; // For visualization only
+	bool partitioned; // For visualization only
 
 	void init(const BaseEmitter *emitters, const uint32_t numEmitters)
 	{
@@ -715,6 +578,7 @@ struct PerPixelData
 		}
 		samplesUsed = 0;
 		entropy = 0;
+		partitioned = false;
 		colorDirect = Spectrum(0.0f);
 	}
 };
@@ -828,7 +692,7 @@ public:
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 			sampler->generate(Point2i(i, j));
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 1);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 3);
 			sampler->advance();
 		});
 
@@ -843,6 +707,8 @@ public:
 			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree);
 		});
 
+		std::cout << "Finished initial cooperative-entropy pass." << std::endl;
+
 		runPool.run([&](int pixelID, int threadID) {
 			ThreadData &td = threadData[threadID];
 			auto sampler = td.sampler.get();
@@ -851,10 +717,11 @@ public:
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 			sampler->generate(Point2i(i, j));
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 1);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
 			sampler->advance();
-			
 		});
+
+		std::cout << "Finished next sampling pass." << std::endl;
 
 		runPool.run([&](int pixelID, int threadID) {
 			int i = pixelID % cropSize.x;
@@ -862,9 +729,11 @@ public:
 
 			std::vector<const EmitterTree *> tree;
 			tree.reserve(8);
-			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 2);
+			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 1);
 		});
 
+		std::cout << "Finished next cooperative-entropy pass." << std::endl;
+		
 		runPool.run([&](int pixelID, int threadID) {
 			ThreadData &td = threadData[threadID];
 			auto sampler = td.sampler.get();
@@ -873,12 +742,25 @@ public:
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 			sampler->generate(Point2i(i, j));
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 1);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			computeEntropy(perPixelData[pixelID]);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			computeEntropy(perPixelData[pixelID]);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			computeEntropy(perPixelData[pixelID]);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			computeEntropy(perPixelData[pixelID]);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			computeEntropy(perPixelData[pixelID]);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			computeEntropy(perPixelData[pixelID]);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
 			shadeAnalytic(gBuffer[pixelID], perPixelData[pixelID]);
 			sampler->advance();
 
 		});
 
+		std::cout << "Finished final sampling-shading pass." << std::endl;
 		
 		//gBufferToImage(result, gBuffer, cropSize);
 		pBufferToImage(result, perPixelData, cropSize);
@@ -965,54 +847,55 @@ public:
 			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, samplesUsed, nSamples);
 		}
 	}
+
+	void computeEntropy(PerPixelData &ppd) 
+	{	
+		ppd.partitioned = false;
+		ppd.entropy = 0;
+		for (uint32_t k = 0; k < emitterCount; k++) {
+			float entropy = 0;
+			ppd.trees[k].computeEntropy(entropy);
+			ppd.partitioned = ppd.trees[k].partition() || ppd.partitioned;
+			ppd.entropy += entropy;
+		}
+	}
 	
 	void computeEntropyCooperative(PrimaryRayData &prd, PerPixelData *ppd, int i, int j, const Vector2i &cropSize, std::vector<const EmitterTree *> &neighbours, uint32_t partionDepth = 1)
 	{
 		if (prd.objectId < 0)
-			return; 
-				
+			return;
+		
+		int neighbourPix[8];
+		int pixelID = j * cropSize.x + i;
+		
+		neighbourPix[0] = (i + 1 < cropSize.x) ? j * cropSize.x + i + 1 : -1;
+		neighbourPix[1] = (i - 1 >= 0) ? j * cropSize.x + i - 1 : -1;
+		neighbourPix[2] = (j + 1 < cropSize.y) ? (j + 1) * cropSize.x + i : -1;
+		neighbourPix[3] = (j - 1 >= 0) ? (j - 1) * cropSize.x + i : -1;
+		neighbourPix[4] = (neighbourPix[2] != -1 && neighbourPix[0] != -1) ? neighbourPix[2] + 1 : -1;
+		neighbourPix[5] = (neighbourPix[2] != -1 && neighbourPix[1] != -1) ? neighbourPix[2] - 1 : -1;
+		neighbourPix[6] = (neighbourPix[3] != -1 && neighbourPix[0] != -1) ? neighbourPix[3] + 1 : -1;
+		neighbourPix[7] = (neighbourPix[3] != -1 && neighbourPix[1] != -1) ? neighbourPix[3] - 1 : -1;
+		
+		ppd[pixelID].partitioned = false;
+		ppd[pixelID].entropy = 0;
 		for (uint32_t k = 0; k < emitterCount; k++) {
 			neighbours.clear();
-
-			if (i + 1 < cropSize.x) {
-				int pixelID = j * cropSize.x + i + 1;
-				neighbours.push_back(&ppd[pixelID].trees[k]);
-			}
-			if (i - 1 >= 0) {
-				int pixelID = j * cropSize.x + i - 1;
-				neighbours.push_back(&ppd[pixelID].trees[k]);
-			}
-			if (j + 1 < cropSize.y) {
-				int pixelID = (j + 1) * cropSize.x + i;
-				neighbours.push_back(&ppd[pixelID].trees[k]);
-
-				if (i - 1 >= 0)
-					neighbours.push_back(&ppd[pixelID - 1].trees[k]);
-				if (i + 1 < cropSize.x)
-					neighbours.push_back(&ppd[pixelID + 1].trees[k]);
-			}
-			if (j - 1 >= 0) {
-				int pixelID = (j - 1) * cropSize.x + i;
-				neighbours.push_back(&ppd[pixelID].trees[k]);
-				
-				if (i - 1 >= 0)
-					neighbours.push_back(&ppd[pixelID - 1].trees[k]);
-				if (i + 1 < cropSize.x)
-					neighbours.push_back(&ppd[pixelID + 1].trees[k]);
+			for (int n = 0; n < 8; n++) {
+				if (neighbourPix[n] != -1) {
+					neighbours.push_back(&ppd[neighbourPix[n]].trees[k]);
+				}
 			}
 
 			float entropy = 0;
-			int pixelID = j * cropSize.x + i;
 			ppd[pixelID].trees[k].computeEntropy(entropy, neighbours);
 
 			for (uint32_t p = 0; p < partionDepth; p++)
-				ppd[pixelID].trees[k].partition();
-			//ppd[pixelID].trees[k].partition();
-			//ppd[pixelID].entropy += entropy;
+				ppd[pixelID].partitioned = ppd[pixelID].trees[k].partition() || ppd[pixelID].partitioned; // Don not change the order, otherwise partition may be optimized out
+			
+			ppd[pixelID].entropy += entropy;
 		}
 	}
-
-
 
 	void shadeAnalytic(PrimaryRayData &prd, PerPixelData &ppd)
 	{
@@ -1033,6 +916,7 @@ public:
 		if (!getMatrices(prd, rotMat, ltcW2l, ltcW2lDet, amplitude, diffuseComponent, specularComponent))
 			return;
 
+		ppd.entropy = 0;
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			float entropy = 0;
 			ppd.trees[i].computeEntropy(entropy);
@@ -1142,11 +1026,12 @@ public:
 				throughputPix[currPix] = pData.colorDirect;
 
 				// for unblurred results
-				for (uint32_t k = 0; k < emitterCount; k++) {
-					throughputPix[currPix] += pData.colorShaded[k];
-				}
+				//for (uint32_t k = 0; k < emitterCount; k++) {
+					//throughputPix[currPix] += pData.colorShaded[k];
+				//}
 				//throughputPix[currPix] = Spectrum(pData.samplesUsed / (emitterCount * 20.0f));
-				//throughputPix[currPix] = Spectrum(pData.entropy / (emitterCount * 50));
+				throughputPix[currPix] = Spectrum(pData.entropy / (emitterCount));
+				//throughputPix[currPix] = Spectrum(pData.partitioned);
 			}
 	}
    
