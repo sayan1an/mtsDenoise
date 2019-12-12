@@ -535,9 +535,9 @@ struct EmitterTree
 		root = new EmitterNode(0, 1, 2);
 	}
 
-	void dumpToFile(std::string fileName) 
+	void dumpToFile(std::string fileName) const
 	{	
-		Point2f v0 = Point2f(0, static_cast<Float>(std::sqrt(3))), v1 = Point2f(-1, 0), v2 = Point2f(0, 1);
+		Point2f v0 = Point2f(0, static_cast<Float>(std::sqrt(3))), v1 = Point2f(-1, 0), v2 = Point2f(1, 0);
 		std::ofstream file;
 		file.open(fileName);
 		
@@ -811,7 +811,7 @@ public:
 			int j = pixelID / cropSize.x;
 			sampler->generate(Point2i(i, j));
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
+			/*computeEntropy(perPixelData[pixelID]);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(perPixelData[pixelID]);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
@@ -822,7 +822,7 @@ public:
 			computeEntropy(perPixelData[pixelID]);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(perPixelData[pixelID]);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);*/
 			shadeAnalytic(gBuffer[pixelID], perPixelData[pixelID]);
 			sampler->advance();
 
@@ -1100,6 +1100,16 @@ public:
 				//throughputPix[currPix] = Spectrum(pData.samplesUsed / (emitterCount * 20.0f));
 				throughputPix[currPix] = Spectrum(pData.entropy / (emitterCount));
 				//throughputPix[currPix] = Spectrum(pData.partitioned);
+				if (i > 0.75 * cropSize.x && i < 0.8 *cropSize.x)
+					if (j > 0.75 * cropSize.y && j < 0.8 *cropSize.y) {
+						throughputPix[currPix].fromLinearRGB(0, 1, 0);
+						if (i == 0.775 * cropSize.x && j == 0.775 * cropSize.y) {
+							pData.trees[0].dumpToFile("entropyData0.txt");
+							pData.trees[1].dumpToFile("entropyData1.txt");
+							std::cout << pData.entropy << std::endl;
+						}
+					}
+				
 			}
 	}
    
