@@ -151,6 +151,7 @@ private:
 };
 
 struct EmitterTree;
+struct PerPixelData;
 
 struct PrimaryRayData
 {
@@ -166,6 +167,8 @@ struct BaseEmitter
 	Spectrum radiance;
 	Float area;
 	Normal normal;
+
+	Float evaluateOneEmitterSample(const Point2f &baryCoord, const Float &subArea, const Point3 &reciverPos, const Normal &reciverNormal, const PerPixelData &prd) const;
 };
 
 struct PerPixelData
@@ -174,7 +177,7 @@ struct PerPixelData
 	Spectrum colorDirect;
 	Spectrum *colorShaded;
 
-	Float cosThetaIncident;
+	Float cosThetaView;
 	//Vector wo; // In local coordinate of reciver normal
 	Matrix3x3 rotMat;
 	Matrix3x3 ltcW2l;
@@ -291,14 +294,16 @@ struct EmitterNode
 		}
 	}
 
-	bool partition(std::vector<Point2> &baryCoords, const Float entropyThreshold)
+	bool partition(const BaseEmitter *baseEmitter, std::vector<Point2> &baryCoords, std::vector<Float> &maxErrors, const uint32_t depth, 
+		const Point &receiverPos, const Normal &reciverNormal, const PerPixelData &ppd,
+		Float entropyThreshold)
 	{	
 		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
 		if (allNullPtr == 0) {
 			// recurse to leaf node
-			uint32_t numPart = nextNode[0]->partition(baryCoords, entropyThreshold) +
-				nextNode[1]->partition(baryCoords, entropyThreshold) +
-				nextNode[2]->partition(baryCoords, entropyThreshold);
+			uint32_t numPart = nextNode[0]->partition(baseEmitter, baryCoords, maxErrors, depth + 1, receiverPos, reciverNormal, ppd, entropyThreshold) +
+				nextNode[1]->partition(baseEmitter, baryCoords, maxErrors, depth + 1, receiverPos, reciverNormal, ppd, entropyThreshold) +
+				nextNode[2]->partition(baseEmitter, baryCoords, maxErrors, depth + 1, receiverPos, reciverNormal, ppd, entropyThreshold);
 
 			return numPart > 0;
 		}
@@ -315,10 +320,16 @@ struct EmitterNode
 		const Point2 &a = baryCoords[idx[0]];
 		const Point2 &b = baryCoords[idx[1]];
 		const Point2 &c = baryCoords[idx[2]];
+		Point2 centroid = (a + b + c) / 3;
+		
+		Float centroidError = 
+			baseEmitter->evaluateOneEmitterSample(centroid, baseEmitter->area / static_cast<float>(std::pow(3.0f, depth)), 
+				receiverPos, reciverNormal, ppd);
 
 		uint32_t indexPivot = static_cast<uint32_t>(baryCoords.size());
 		// push the centroid as pivot for now
-		baryCoords.push_back((a + b + c) / 3);
+		baryCoords.push_back(centroid);
+		maxErrors.push_back(centroidError);
 		
 		nextNode[0] = new EmitterNode(indexPivot, idx[0], idx[1]);
 		nextNode[1] = new EmitterNode(indexPivot, idx[1], idx[2]);
@@ -385,6 +396,8 @@ struct EmitterNode
 			result = std::abs(result);
 
 		sum = ppd.diffuseComponent * result * 0.5f * INV_PI;
+
+		//TODO::add specular component
 
 		return sum * emitter->radiance;
 	}
@@ -536,9 +549,9 @@ struct EmitterTree
 	}
 
 	// This will recursively go down to the leaf node and partition the leaf node if required.
-	bool partition(const Float &entropyThresold) 
+	bool partition(const Normal &reciverNormal, const Point &reciverPos, const PerPixelData &ppd, const Float &entropyThresold)
 	{
-		return root->partition(baryCoords, entropyThresold);
+		return root->partition(baseEmitter, baryCoords, maxErrors, 0, reciverPos, reciverNormal, ppd, entropyThresold);
 	}
 
 	// This will recursively evaluate the tesselated triangles.
@@ -548,12 +561,17 @@ struct EmitterTree
 		return root->eval(baryCoords, baseEmitter, receiverPos, ppd);
 	}
 
-	void init(const BaseEmitter *baseEmitterPtr)
+	void init(const BaseEmitter *baseEmitterPtr, const Normal &reciverNormal, const Point &reciverPos, const PerPixelData &ppd)
 	{
 		baseEmitter = baseEmitterPtr;
+
 		baryCoords.push_back(Point2(1, 0));
 		baryCoords.push_back(Point2(0, 1));
 		baryCoords.push_back(Point2(0, 0));
+		
+		maxErrors.push_back(baseEmitter->evaluateOneEmitterSample(baryCoords[0], baseEmitter->area, reciverPos, reciverNormal, ppd));
+		maxErrors.push_back(baseEmitter->evaluateOneEmitterSample(baryCoords[1], baseEmitter->area, reciverPos, reciverNormal, ppd));
+		maxErrors.push_back(baseEmitter->evaluateOneEmitterSample(baryCoords[2], baseEmitter->area, reciverPos, reciverNormal, ppd));
 		
 		root = new EmitterNode(0, 1, 2);
 	}
@@ -586,13 +604,36 @@ struct EmitterTree
 	}
 };
 
+Float BaseEmitter::evaluateOneEmitterSample(const Point2f &baryCoord, const Float &subArea, const Point3 &reciverPos, const Normal &reciverNormal, const PerPixelData &ppd) const
+{
+	Point3 worldSpacePosition = baryCoord.x * vertexPositions[0] +
+		baryCoord.y * vertexPositions[1] +
+		(1 - baryCoord.x - baryCoord.y) *  vertexPositions[2];
+
+	Vector direction = worldSpacePosition - reciverPos;
+
+	Float cosThetaIncident = dot(reciverNormal, direction);
+	if (cosThetaIncident < 0)
+		return 0;
+	
+	Float length = direction.length();
+	direction /= length;
+
+	// TODO:: Fix the abs
+	Float cosThetaEmitter = abs(dot(-direction, normal));
+	
+	// TODO:: add specular component
+	return radiance.max() * cosThetaIncident * cosThetaEmitter * ppd.diffuseComponent.max() * subArea / (length * length * M_PI) ;
+
+}
+
 void PerPixelData::init(const BaseEmitter *emitters, const uint32_t numEmitters, const PrimaryRayData &prd)
 {
 	trees = new EmitterTree[numEmitters];
 	colorShaded = new Spectrum[numEmitters];
 
 	for (uint32_t i = 0; i < numEmitters; i++) {
-		trees[i].init(&emitters[i]);
+		trees[i].init(&emitters[i], prd.its->shFrame.n, prd.its->p, *this);
 		colorShaded[i] = Spectrum(0.0f);
 	}
 	samplesUsed = 0;
@@ -600,7 +641,7 @@ void PerPixelData::init(const BaseEmitter *emitters, const uint32_t numEmitters,
 	partitioned = false;
 	colorDirect = Spectrum(0.0f);
 
-	cosThetaIncident = -1;
+	cosThetaView = -1;
 	rotMat = GET_MAT3x3_IDENTITY;
 	//wo = Vector(0.0f);
 	ltcW2l = GET_MAT3x3_IDENTITY;
@@ -610,9 +651,9 @@ void PerPixelData::init(const BaseEmitter *emitters, const uint32_t numEmitters,
 	specularComponent = Spectrum(0.0f);
 
 	if (prd.objectId >= 0) {
-		Analytic::getRotMat(*prd.its, -prd.primaryRay->d, cosThetaIncident, rotMat);
+		Analytic::getRotMat(*prd.its, -prd.primaryRay->d, cosThetaView, rotMat);
 
-		if (cosThetaIncident < 0)
+		if (cosThetaView < 0)
 			return;
 		//wo = rotMat * (-prd.primaryRay->d);
 		const BSDF *bsdf = ((prd.its)->getBSDF(*prd.primaryRay));
@@ -620,15 +661,13 @@ void PerPixelData::init(const BaseEmitter *emitters, const uint32_t numEmitters,
 		specularComponent = Spectrum(0.0f);
 
 		if (!bsdf->isDiffuse()) {
-			Float thetaIncident = std::acos(cosThetaIncident);
-			bsdf->transform(*prd.its, thetaIncident, ltcW2l, ltcAmplitude);
+			Float thetaView = std::acos(cosThetaView);
+			bsdf->transform(*prd.its, thetaView, ltcW2l, ltcAmplitude);
 			ltcW2lDet = ltcW2l.det();
 			specularComponent = bsdf->getSpecularReflectance(*prd.its);
 		}
 	}
 }
-
-
 
 void EmitterNode::computeEntropy(const std::vector<Point2> &baryCoords, const BaseEmitter *emitter, const std::vector<Point2> &samples, const std::vector<bool> &visibility, float &entropyVis, const std::vector<const EmitterTree *> &neightbourSamples)
 {
@@ -947,7 +986,7 @@ public:
 	{
 		if (prd.objectId < 0)
 			return;
-		else if (ppd.cosThetaIncident < 0)
+		else if (ppd.cosThetaView < 0)
 			return;
 
 		const Scene *scene = rRec.scene;
@@ -957,9 +996,9 @@ public:
 		}
 	}
 
-	void computeEntropy(PerPixelData &ppd, const Float &entropyThreshold) 
+	void computeEntropy(PrimaryRayData &prd, PerPixelData &ppd, const Float &entropyThreshold)
 	{
-		if (ppd.cosThetaIncident < 0)
+		if (ppd.cosThetaView < 0)
 			return;
 
 		ppd.partitioned = false;
@@ -967,7 +1006,7 @@ public:
 		for (uint32_t k = 0; k < emitterCount; k++) {
 			float entropy = 0;
 			ppd.trees[k].computeEntropy(entropy);
-			ppd.partitioned = ppd.trees[k].partition(entropyThreshold) || ppd.partitioned;
+			ppd.partitioned = ppd.trees[k].partition(prd.its->shFrame.n, prd.its->p, ppd, entropyThreshold) || ppd.partitioned;
 			ppd.entropy += entropy;
 		}
 	}
@@ -977,7 +1016,7 @@ public:
 		int pixelID = j * cropSize.x + i;
 		if (prd.objectId < 0)
 			return;
-		else if (ppd[pixelID].cosThetaIncident < 0)
+		else if (ppd[pixelID].cosThetaView < 0)
 			return;
 		
 		int neighbourPix[8];
@@ -1005,7 +1044,7 @@ public:
 			ppd[pixelID].trees[k].computeEntropy(entropy, neighbours);
 
 			for (uint32_t p = 0; p < partionDepth; p++)
-				ppd[pixelID].partitioned = ppd[pixelID].trees[k].partition(entropyThreshold) || ppd[pixelID].partitioned; // Don not change the order, otherwise partition may be optimized out
+				ppd[pixelID].partitioned = ppd[pixelID].trees[k].partition(prd.its->shFrame.n, prd.its->p, ppd[pixelID], entropyThreshold) || ppd[pixelID].partitioned; // Don not change the order, otherwise partition may be optimized out
 			
 			ppd[pixelID].entropy += entropy;
 		}
@@ -1019,7 +1058,7 @@ public:
 			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
-		else if (ppd.cosThetaIncident < 0)
+		else if (ppd.cosThetaView < 0)
 			return;
 	
 		ppd.entropy = 0;
@@ -1038,7 +1077,7 @@ public:
 			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
-		else if (ppd.cosThetaIncident < 0)
+		else if (ppd.cosThetaView < 0)
 			return;
 		
 		/*for (uint32_t i = 0; i < emitterCount; i++) {
