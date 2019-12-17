@@ -170,7 +170,6 @@ struct EmitterNode
 	Float entropy; // compute this in computeEntropy, use neighbour pixels to compute
 	uint32_t nBlack; // find this in computeEntropy, use only current pixel values;
 	uint32_t nWhite; // find this in computeEntropy, use only current pixel values;
-#define ENTROPY_THRESHOLD 0.4f
 	
 	void sample(const std::vector<Point2> &baryCoords, Sampler *sampler, std::vector<Point2> &samples, const BaseEmitter *emitter, uint32_t maxSamples)
 	{	
@@ -260,14 +259,14 @@ struct EmitterNode
 		}
 	}
 
-	bool partition(std::vector<Point2> &baryCoords)
+	bool partition(std::vector<Point2> &baryCoords, const Float entropyThreshold)
 	{	
 		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
 		if (allNullPtr == 0) {
 			// recurse to leaf node
-			uint32_t numPart = nextNode[0]->partition(baryCoords) + 
-				nextNode[1]->partition(baryCoords) + 
-				nextNode[2]->partition(baryCoords);
+			uint32_t numPart = nextNode[0]->partition(baryCoords, entropyThreshold) +
+				nextNode[1]->partition(baryCoords, entropyThreshold) +
+				nextNode[2]->partition(baryCoords, entropyThreshold);
 
 			return numPart > 0;
 		}
@@ -277,7 +276,7 @@ struct EmitterNode
 		}
 
 		// Check if there is need for partion based on entropy
-		if (entropy < ENTROPY_THRESHOLD)
+		if (entropy < entropyThreshold)
 			return false;
 
 		// compute appropriate pivot location
@@ -447,7 +446,6 @@ private:
 		float t = (d00 * d21 - d01 * d20) / denom;
 		bary.x = 1.0f - bary.y - t;
 	}
-#undef ENTROPY_THRESHOLD
 };
 
 struct EmitterTree
@@ -511,9 +509,9 @@ struct EmitterTree
 	}
 
 	// This will recursively go down to the leaf node and partition the leaf node if required.
-	bool partition() 
+	bool partition(const Float &entropyThresold) 
 	{
-		return root->partition(baryCoords);
+		return root->partition(baryCoords, entropyThresold);
 	}
 
 	// This will recursively evaluate the tesselated triangles.
@@ -772,7 +770,7 @@ public:
 		
 			std::vector<const EmitterTree *> tree;
 			tree.reserve(8);
-			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree);
+			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 0.4f);
 		});
 
 		std::cout << "Finished initial cooperative-entropy pass." << std::endl;
@@ -797,7 +795,7 @@ public:
 
 			std::vector<const EmitterTree *> tree;
 			tree.reserve(8);
-			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 1);
+			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 0.4f);
 		});
 
 		std::cout << "Finished next cooperative-entropy pass." << std::endl;
@@ -916,19 +914,19 @@ public:
 		}
 	}
 
-	void computeEntropy(PerPixelData &ppd) 
+	void computeEntropy(PerPixelData &ppd, const Float &entropyThreshold) 
 	{	
 		ppd.partitioned = false;
 		ppd.entropy = 0;
 		for (uint32_t k = 0; k < emitterCount; k++) {
 			float entropy = 0;
 			ppd.trees[k].computeEntropy(entropy);
-			ppd.partitioned = ppd.trees[k].partition() || ppd.partitioned;
+			ppd.partitioned = ppd.trees[k].partition(entropyThreshold) || ppd.partitioned;
 			ppd.entropy += entropy;
 		}
 	}
 	
-	void computeEntropyCooperative(PrimaryRayData &prd, PerPixelData *ppd, int i, int j, const Vector2i &cropSize, std::vector<const EmitterTree *> &neighbours, uint32_t partionDepth = 1)
+	void computeEntropyCooperative(PrimaryRayData &prd, PerPixelData *ppd, int i, int j, const Vector2i &cropSize, std::vector<const EmitterTree *> &neighbours, const Float &entropyThreshold, uint32_t partionDepth = 1)
 	{
 		if (prd.objectId < 0)
 			return;
@@ -959,7 +957,7 @@ public:
 			ppd[pixelID].trees[k].computeEntropy(entropy, neighbours);
 
 			for (uint32_t p = 0; p < partionDepth; p++)
-				ppd[pixelID].partitioned = ppd[pixelID].trees[k].partition() || ppd[pixelID].partitioned; // Don not change the order, otherwise partition may be optimized out
+				ppd[pixelID].partitioned = ppd[pixelID].trees[k].partition(entropyThreshold) || ppd[pixelID].partitioned; // Don not change the order, otherwise partition may be optimized out
 			
 			ppd[pixelID].entropy += entropy;
 		}
@@ -1094,22 +1092,31 @@ public:
 				throughputPix[currPix] = pData.colorDirect;
 
 				// for unblurred results
-				//for (uint32_t k = 0; k < emitterCount; k++) {
-					//throughputPix[currPix] += pData.colorShaded[k];
-				//}
+				for (uint32_t k = 0; k < emitterCount; k++) {
+					throughputPix[currPix] += pData.colorShaded[k];
+				}
 				//throughputPix[currPix] = Spectrum(pData.samplesUsed / (emitterCount * 20.0f));
-				throughputPix[currPix] = Spectrum(pData.entropy / (emitterCount));
+				//throughputPix[currPix] = Spectrum(pData.entropy / (emitterCount));
 				//throughputPix[currPix] = Spectrum(pData.partitioned);
-				if (i > 0.75 * cropSize.x && i < 0.8 *cropSize.x)
-					if (j > 0.75 * cropSize.y && j < 0.8 *cropSize.y) {
-						throughputPix[currPix].fromLinearRGB(0, 1, 0);
-						if (i == 0.775 * cropSize.x && j == 0.775 * cropSize.y) {
-							pData.trees[0].dumpToFile("entropyData0.txt");
-							pData.trees[1].dumpToFile("entropyData1.txt");
-							std::cout << pData.entropy << std::endl;
-						}
-					}
+				dumpToFile(Point2f(0.4f, 0.45f), Point2f(0.7f, 0.75f), cropSize, i, j, throughputPix[currPix], pData);
 				
+			}
+	}
+
+	void dumpToFile(const Point2f &xLim, const Point2f &yLim, const Vector2i &cropSize, size_t i, size_t j, Spectrum &out, const PerPixelData &pData)
+	{
+		if (i > xLim.x * cropSize.x && i < xLim.y *cropSize.x)
+			if (j > yLim.x * cropSize.y && j < yLim.y *cropSize.y) {
+				out.fromLinearRGB(0, 1, 0);
+				Float xAvg = (xLim.x + xLim.y) / 2.0f;
+				Float yAvg = (yLim.x + yLim.y) / 2.0f;
+				//std::cout << xAvg * cropSize.x << " " << yAvg * cropSize.y << " " << i << " " << j << std::endl;
+				if (i == static_cast<size_t>(xAvg * cropSize.x) && j == static_cast<size_t>(yAvg * cropSize.y)) {
+					std::cout << pData.entropy << std::endl;
+					pData.trees[0].dumpToFile("../src/integrators/custom/entropy/entropyData0.txt");
+					pData.trees[1].dumpToFile("../src/integrators/custom/entropy/entropyData1.txt");
+
+				}
 			}
 	}
    
