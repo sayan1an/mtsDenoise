@@ -152,10 +152,42 @@ private:
 
 struct EmitterTree;
 
+struct PrimaryRayData
+{
+	Intersection *its;
+	RayDifferential *primaryRay;
+	Float depth;
+	int objectId;
+};
+
 struct BaseEmitter
 {
 	Point vertexPositions[3];
 	Spectrum radiance;
+	Float area;
+	Normal normal;
+};
+
+struct PerPixelData
+{
+	EmitterTree *trees = nullptr;
+	Spectrum colorDirect;
+	Spectrum *colorShaded;
+
+	Float cosThetaIncident;
+	//Vector wo; // In local coordinate of reciver normal
+	Matrix3x3 rotMat;
+	Matrix3x3 ltcW2l;
+	Float ltcW2lDet;
+	Float ltcAmplitude;
+	Spectrum diffuseComponent;
+	Spectrum specularComponent;
+
+	uint32_t samplesUsed; // For visualization only
+	float entropy; // For visualization only
+	bool partitioned; // For visualization only
+
+	void init(const BaseEmitter *emitters, const uint32_t numEmitters, const PrimaryRayData &prd);
 };
 
 // sample -> compuetEntropy -> partition -> evaluate
@@ -299,10 +331,7 @@ struct EmitterNode
 	Spectrum eval(const std::vector<Point2> &baryCoords,
 		const BaseEmitter *emitter,
 		const Point3 &receiverPos,
-		const Matrix3x3 &rotMat,
-		const Spectrum &diffuseComponent, const Spectrum &specularComponent,
-		const Matrix3x3 &w2l_bsdf = GET_MAT3x3_IDENTITY,
-		const float &amplitude = 1)
+		const PerPixelData &ppd)
 	{
 		// Check if all nextNode are either null or have some value
 
@@ -312,16 +341,16 @@ struct EmitterNode
 			if (nWhite == 0)
 				return Spectrum(0.0f);
 
-			return analytic(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude) * (static_cast<Float>(nWhite) / (nBlack + nWhite));
+			return analytic(baryCoords, emitter, receiverPos, ppd) * (static_cast<Float>(nWhite) / (nBlack + nWhite));
 		}
 		else if (allNullPtr > 0) {
 			std::cerr << "Next node must be all nullptr or all must have some value" << std::endl;
 			return Spectrum(0.0f);
 		}
 		else {
-			return nextNode[0]->eval(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude) +
-				nextNode[1]->eval(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude) +
-				nextNode[2]->eval(baryCoords, emitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude);
+			return nextNode[0]->eval(baryCoords, emitter, receiverPos, ppd) +
+				nextNode[1]->eval(baryCoords, emitter, receiverPos, ppd) +
+				nextNode[2]->eval(baryCoords, emitter, receiverPos, ppd);
 		}
 
 	}
@@ -329,10 +358,7 @@ struct EmitterNode
 	Spectrum analytic(const std::vector<Point2> &baryCoords, 
 		const BaseEmitter *emitter, 
 		const Point3 &receiverPos, 
-		const Matrix3x3 &rotMat, 
-		const Spectrum &diffuseComponent, const Spectrum &specularComponent,
-		const Matrix3x3 &w2l_bsdf = GET_MAT3x3_IDENTITY, 
-		const float &amplitude = 1)
+		const PerPixelData &ppd)
 	{	
 		Spectrum sum(0.0f);
 
@@ -346,9 +372,9 @@ struct EmitterNode
 		Point3 worldSpaceVertex1 = b.x * emitter->vertexPositions[0] + b.y * emitter->vertexPositions[1] + (1 - b.x - b.y) *  emitter->vertexPositions[2];
 		Point3 worldSpaceVertex2 = c.x * emitter->vertexPositions[0] + c.y * emitter->vertexPositions[1] + (1 - c.x - c.y) *  emitter->vertexPositions[2];
 
-		Vector3 localEdge0 = rotMat * (worldSpaceVertex0 - receiverPos);
-		Vector3 localEdge1 = rotMat * (worldSpaceVertex1 - receiverPos);
-		Vector3 localEdge2 = rotMat * (worldSpaceVertex2 - receiverPos);
+		Vector3 localEdge0 = ppd.rotMat * (worldSpaceVertex0 - receiverPos);
+		Vector3 localEdge1 = ppd.rotMat * (worldSpaceVertex1 - receiverPos);
+		Vector3 localEdge2 = ppd.rotMat * (worldSpaceVertex2 - receiverPos);
 
 		Float result = Analytic::integrate(localEdge0, localEdge1, localEdge2);
 
@@ -358,7 +384,7 @@ struct EmitterNode
 		else // double sided light source
 			result = std::abs(result);
 
-		sum = diffuseComponent * result * 0.5f * INV_PI;
+		sum = ppd.diffuseComponent * result * 0.5f * INV_PI;
 
 		return sum * emitter->radiance;
 	}
@@ -452,6 +478,7 @@ struct EmitterTree
 {	
 	const BaseEmitter *baseEmitter = nullptr;
 	std::vector<Point2f> baryCoords; // pivot points for partitioning
+	std::vector<Float> maxErrors; // Evaluate estimate of irradiance from location baryCoords 
 	// Next two are sample visibility pairs
 	std::vector<Point2f> samples; // samples stored as barycentric coords
 	std::vector<bool> visibility; // true == visible
@@ -516,12 +543,9 @@ struct EmitterTree
 
 	// This will recursively evaluate the tesselated triangles.
 	Spectrum eval(const Point3 &receiverPos,
-		const Matrix3x3 &rotMat,
-		const Spectrum &diffuseComponent, const Spectrum &specularComponent,
-		const Matrix3x3 &w2l_bsdf = GET_MAT3x3_IDENTITY,
-		const float &amplitude = 1) 
+		const PerPixelData &ppd) 
 	{
-		return root->eval(baryCoords, baseEmitter, receiverPos, rotMat, diffuseComponent, specularComponent, w2l_bsdf, amplitude);
+		return root->eval(baryCoords, baseEmitter, receiverPos, ppd);
 	}
 
 	void init(const BaseEmitter *baseEmitterPtr)
@@ -530,6 +554,7 @@ struct EmitterTree
 		baryCoords.push_back(Point2(1, 0));
 		baryCoords.push_back(Point2(0, 1));
 		baryCoords.push_back(Point2(0, 0));
+		
 		root = new EmitterNode(0, 1, 2);
 	}
 
@@ -560,6 +585,50 @@ struct EmitterTree
 		file.close();
 	}
 };
+
+void PerPixelData::init(const BaseEmitter *emitters, const uint32_t numEmitters, const PrimaryRayData &prd)
+{
+	trees = new EmitterTree[numEmitters];
+	colorShaded = new Spectrum[numEmitters];
+
+	for (uint32_t i = 0; i < numEmitters; i++) {
+		trees[i].init(&emitters[i]);
+		colorShaded[i] = Spectrum(0.0f);
+	}
+	samplesUsed = 0;
+	entropy = 0;
+	partitioned = false;
+	colorDirect = Spectrum(0.0f);
+
+	cosThetaIncident = -1;
+	rotMat = GET_MAT3x3_IDENTITY;
+	//wo = Vector(0.0f);
+	ltcW2l = GET_MAT3x3_IDENTITY;
+	ltcW2lDet = 1;
+	ltcAmplitude = 1;
+	diffuseComponent = Spectrum(0.0f);
+	specularComponent = Spectrum(0.0f);
+
+	if (prd.objectId >= 0) {
+		Analytic::getRotMat(*prd.its, -prd.primaryRay->d, cosThetaIncident, rotMat);
+
+		if (cosThetaIncident < 0)
+			return;
+		//wo = rotMat * (-prd.primaryRay->d);
+		const BSDF *bsdf = ((prd.its)->getBSDF(*prd.primaryRay));
+		diffuseComponent = bsdf->getDiffuseReflectance(*prd.its);
+		specularComponent = Spectrum(0.0f);
+
+		if (!bsdf->isDiffuse()) {
+			Float thetaIncident = std::acos(cosThetaIncident);
+			bsdf->transform(*prd.its, thetaIncident, ltcW2l, ltcAmplitude);
+			ltcW2lDet = ltcW2l.det();
+			specularComponent = bsdf->getSpecularReflectance(*prd.its);
+		}
+	}
+}
+
+
 
 void EmitterNode::computeEntropy(const std::vector<Point2> &baryCoords, const BaseEmitter *emitter, const std::vector<Point2> &samples, const std::vector<bool> &visibility, float &entropyVis, const std::vector<const EmitterTree *> &neightbourSamples)
 {
@@ -615,78 +684,6 @@ void EmitterNode::computeEntropy(const std::vector<Point2> &baryCoords, const Ba
 
 	entropyVis += entropy;// static_cast<Float>(nWhite) / (nWhite + nBlack);
 }
-
-struct PrimaryRayData 
-{
-	Intersection *its;
-	RayDifferential *primaryRay;
-	Float depth;
-    int objectId;
-};
-
-struct PerPixelData
-{
-	EmitterTree *trees = nullptr;
-	Spectrum colorDirect;
-	Spectrum *colorShaded;
-
-	Float cosThetaIncident;
-	Vector wo; // In local coordinate of reciver normal
-	Matrix3x3 rotMat;
-	Matrix3x3 ltcW2l;
-	Float ltcW2lDet;
-	Float ltcAmplitude;
-	Spectrum diffuseComponent;
-	Spectrum specularComponent;
-
-	uint32_t samplesUsed; // For visualization only
-	float entropy; // For visualization only
-	bool partitioned; // For visualization only
-
-	void init(const BaseEmitter *emitters, const uint32_t numEmitters, const PrimaryRayData &prd)
-	{
-		trees = new EmitterTree[numEmitters];
-		colorShaded = new Spectrum[numEmitters];
-
-		for (uint32_t i = 0; i < numEmitters; i++) {
-			trees[i].init(&emitters[i]);
-			colorShaded[i] = Spectrum(0.0f);
-		}
-		samplesUsed = 0;
-		entropy = 0;
-		partitioned = false;
-		colorDirect = Spectrum(0.0f);
-
-		cosThetaIncident = -1;
-		rotMat = GET_MAT3x3_IDENTITY;
-		wo = Vector(0.0f);
-		ltcW2l = GET_MAT3x3_IDENTITY;
-		ltcW2lDet = 1;
-		ltcAmplitude = 1;
-		diffuseComponent = Spectrum(0.0f);
-		specularComponent = Spectrum(0.0f);
-		
-		if (prd.objectId >= 0) {
-			Analytic::getRotMat(*prd.its, -prd.primaryRay->d, cosThetaIncident, rotMat);
-
-			if (cosThetaIncident < 0)
-				return;
-
-			wo = rotMat * (-prd.primaryRay->d);
-
-			const BSDF *bsdf = ((prd.its)->getBSDF(*prd.primaryRay));
-			diffuseComponent = bsdf->getDiffuseReflectance(*prd.its);
-			specularComponent = Spectrum(0.0f);
-
-			if (!bsdf->isDiffuse()) {
-				Float thetaIncident = std::acos(cosThetaIncident);
-				bsdf->transform(*prd.its, thetaIncident, ltcW2l, ltcAmplitude);
-				ltcW2lDet = ltcW2l.det();
-				specularComponent = bsdf->getSpecularReflectance(*prd.its);
-			}
-		}
-	}
-};
 
 class Entropy : public Integrator {
 public:
@@ -911,6 +908,11 @@ public:
 					emitters[numEmitters].vertexPositions[1] = vertexPositions[triangles[i].idx[1]];
 					emitters[numEmitters].vertexPositions[2] = vertexPositions[triangles[i].idx[0]];
 					emitters[numEmitters].radiance = emitter->getRadiance();
+					emitters[numEmitters].normal = cross(emitters[numEmitters].vertexPositions[1] - emitters[numEmitters].vertexPositions[0],
+						emitters[numEmitters].vertexPositions[2] - emitters[numEmitters].vertexPositions[0]);
+					emitters[numEmitters].area = emitters[numEmitters].normal.length();
+					emitters[numEmitters].normal /= emitters[numEmitters].area;
+					emitters[numEmitters].area *= 0.5f;
 					numEmitters++;
 				}
 			}
@@ -1024,7 +1026,7 @@ public:
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			float entropy = 0;
 			ppd.trees[i].computeEntropy(entropy);
-			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, ppd.rotMat, ppd.diffuseComponent, ppd.specularComponent);
+			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, ppd);
 			ppd.entropy += entropy;
 		}
 	}
@@ -1081,7 +1083,7 @@ public:
 		}*/
 		
 		for (uint32_t i = 0; i < emitterCount; i++) {
-			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, ppd.rotMat, ppd.diffuseComponent, ppd.specularComponent);
+			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, ppd);
 		}
 	}
 	
