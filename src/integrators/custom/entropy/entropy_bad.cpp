@@ -170,7 +170,7 @@ struct EmitterNode
 	Float entropy; // compute this in computeEntropy, use neighbour pixels to compute
 	uint32_t nBlack; // find this in computeEntropy, use only current pixel values;
 	uint32_t nWhite; // find this in computeEntropy, use only current pixel values;
-#define ENTROPY_THRESHOLD 0.4f
+#define ENTROPY_THRESHOLD 0.9f
 	
 	void sample(const std::vector<Point2> &baryCoords, Sampler *sampler, std::vector<Point2> &samples, const BaseEmitter *emitter, uint32_t maxSamples)
 	{	
@@ -260,14 +260,14 @@ struct EmitterNode
 		}
 	}
 
-	bool partition(std::vector<Point2> &baryCoords)
+	bool partition(std::vector<Point2> &baryCoords, const Float entropyThreshold)
 	{	
 		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
 		if (allNullPtr == 0) {
 			// recurse to leaf node
-			uint32_t numPart = nextNode[0]->partition(baryCoords) + 
-				nextNode[1]->partition(baryCoords) + 
-				nextNode[2]->partition(baryCoords);
+			uint32_t numPart = nextNode[0]->partition(baryCoords, entropyThreshold) + 
+				nextNode[1]->partition(baryCoords, entropyThreshold) +
+				nextNode[2]->partition(baryCoords, entropyThreshold);
 
 			return numPart > 0;
 		}
@@ -277,7 +277,7 @@ struct EmitterNode
 		}
 
 		// Check if there is need for partion based on entropy
-		if (entropy < ENTROPY_THRESHOLD)
+		if (entropy < entropyThreshold)
 			return false;
 
 		// compute appropriate pivot location
@@ -404,7 +404,7 @@ struct EmitterNode
 	}
 
 	void computeEntropy(const std::vector<Point2> &baryCoords, const BaseEmitter *emitter, const std::vector<Point2> &samples, const std::vector<bool> &visibility, float &entropyVis, const std::vector<const EmitterTree *> &neightbourSamples);
-
+	
 	EmitterNode(uint32_t i0, uint32_t i1, uint32_t i2)
 	{
 		idx[0] = i0;
@@ -414,6 +414,18 @@ struct EmitterNode
 		entropy = std::numeric_limits<Float>::max();
 	}
 private:
+	Float computeMaxError(const std::vector<Point2> &baryCoords, const BaseEmitter *emitter,
+		const Point &reciverPoint, const Point2 &a, const Point2 &b, const Point2 &c, const Point2 &centroid,
+		const Vector &wo, // Note : We assume wo in local frame, i.e. should have already been multiplied by rotMat 
+		const Matrix3x3 &rotMat,
+		const Spectrum &diffuseComponent, const Spectrum &specularComponent,
+		const Matrix3x3 &w2l_bsdf = GET_MAT3x3_IDENTITY,
+		const float &amplitude = 1)
+	{
+
+
+		return 0;
+	}
 	static Float sign(const Point2f &p1, const Point2f &p2, const Point2f &p3)
 	{
 		return (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y);
@@ -511,9 +523,9 @@ struct EmitterTree
 	}
 
 	// This will recursively go down to the leaf node and partition the leaf node if required.
-	bool partition() 
+	bool partition(const Float entropyThreshold) 
 	{
-		return root->partition(baryCoords);
+		return root->partition(baryCoords, entropyThreshold);
 	}
 
 	// This will recursively evaluate the tesselated triangles.
@@ -631,11 +643,21 @@ struct PerPixelData
 	EmitterTree *trees = nullptr;
 	Spectrum colorDirect;
 	Spectrum *colorShaded;
+	
+	Float cosThetaIncident;
+	Vector wo; // In local coordinate of reciver normal
+	Matrix3x3 rotMat;
+	Matrix3x3 ltcW2l;
+	Float ltcW2lDet;
+	Float ltcAmplitude;
+	Spectrum diffuseComponent;
+	Spectrum specularComponent;
+	
 	uint32_t samplesUsed; // For visualization only
 	float entropy; // For visualization only
 	bool partitioned; // For visualization only
 
-	void init(const BaseEmitter *emitters, const uint32_t numEmitters)
+	void init(const BaseEmitter *emitters, const uint32_t numEmitters, const PrimaryRayData &prd)
 	{
 		trees = new EmitterTree[numEmitters];
 		colorShaded = new Spectrum[numEmitters];
@@ -648,6 +670,34 @@ struct PerPixelData
 		entropy = 0;
 		partitioned = false;
 		colorDirect = Spectrum(0.0f);
+
+		cosThetaIncident = -1;
+		rotMat = GET_MAT3x3_IDENTITY;
+		wo = Vector(0.0f);
+		ltcW2l = GET_MAT3x3_IDENTITY;
+		ltcW2lDet = 1;
+		ltcAmplitude = 1;
+		diffuseComponent = Spectrum(0.0f);
+		specularComponent = Spectrum(0.0f);
+
+		if (prd.objectId >= 0) {
+			Analytic::getRotMat(*prd.its, -prd.primaryRay->d, cosThetaIncident, rotMat);
+
+			if (cosThetaIncident < 0)
+				return;
+			
+			wo = rotMat * (-prd.primaryRay->d);
+
+			const BSDF *bsdf = ((prd.its)->getBSDF(*prd.primaryRay));
+			diffuseComponent = bsdf->getDiffuseReflectance(*prd.its);
+			specularComponent = Spectrum(0.0f);
+			if (!bsdf->isDiffuse()) {
+				Float thetaIncident = std::acos(cosThetaIncident);
+				bsdf->transform(*prd.its, thetaIncident, ltcW2l, ltcAmplitude);
+				ltcW2lDet = ltcW2l.det();
+				specularComponent = bsdf->getSpecularReflectance(*prd.its);
+			}
+		}
 	}
 };
 
@@ -747,7 +797,7 @@ public:
 			gBufferPass(sensorRay, rRec, gBuffer[pixelID]);
             sampler->advance();
 
-			perPixelData[pixelID].init(emitters, emitterCount);
+			perPixelData[pixelID].init(emitters, emitterCount, gBuffer[pixelID]);
         });
 
 		std::cout << "Finished GBuffer pass." << std::endl;
@@ -772,7 +822,7 @@ public:
 		
 			std::vector<const EmitterTree *> tree;
 			tree.reserve(8);
-			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree);
+			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 0.1f, 1);
 		});
 
 		std::cout << "Finished initial cooperative-entropy pass." << std::endl;
@@ -797,7 +847,7 @@ public:
 
 			std::vector<const EmitterTree *> tree;
 			tree.reserve(8);
-			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 1);
+			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 0.1f, 1);
 		});
 
 		std::cout << "Finished next cooperative-entropy pass." << std::endl;
@@ -811,18 +861,18 @@ public:
 			int j = pixelID / cropSize.x;
 			sampler->generate(Point2i(i, j));
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			/*computeEntropy(perPixelData[pixelID]);
+			computeEntropy(perPixelData[pixelID], 0.1f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
+			computeEntropy(perPixelData[pixelID], 0.1f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
+			computeEntropy(perPixelData[pixelID], 0.1f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
+			computeEntropy(perPixelData[pixelID], 0.1f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
+			computeEntropy(perPixelData[pixelID], 0.1f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);*/
+			computeEntropy(perPixelData[pixelID], 0.1f);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
 			shadeAnalytic(gBuffer[pixelID], perPixelData[pixelID]);
 			sampler->advance();
 
@@ -908,6 +958,8 @@ public:
 	{
 		if (prd.objectId < 0)
 			return;
+		else if (ppd.cosThetaIncident < 0)
+			return;
 
 		const Scene *scene = rRec.scene;
 		for (uint32_t i = 0; i < emitterCount; i++) {
@@ -916,21 +968,26 @@ public:
 		}
 	}
 
-	void computeEntropy(PerPixelData &ppd) 
+	void computeEntropy(PerPixelData &ppd, const Float entropyThreshold) 
 	{	
+		if (ppd.cosThetaIncident < 0)
+			return;
+
 		ppd.partitioned = false;
 		ppd.entropy = 0;
 		for (uint32_t k = 0; k < emitterCount; k++) {
 			float entropy = 0;
 			ppd.trees[k].computeEntropy(entropy);
-			ppd.partitioned = ppd.trees[k].partition() || ppd.partitioned;
+			ppd.partitioned = ppd.trees[k].partition(entropyThreshold) || ppd.partitioned;
 			ppd.entropy += entropy;
 		}
 	}
 	
-	void computeEntropyCooperative(PrimaryRayData &prd, PerPixelData *ppd, int i, int j, const Vector2i &cropSize, std::vector<const EmitterTree *> &neighbours, uint32_t partionDepth = 1)
+	void computeEntropyCooperative(PrimaryRayData &prd, PerPixelData *ppd, int i, int j, const Vector2i &cropSize, std::vector<const EmitterTree *> &neighbours, const Float entropyThreshold, uint32_t partionDepth = 1)
 	{
 		if (prd.objectId < 0)
+			return;
+		else if (ppd->cosThetaIncident < 0)
 			return;
 		
 		int neighbourPix[8];
@@ -959,7 +1016,7 @@ public:
 			ppd[pixelID].trees[k].computeEntropy(entropy, neighbours);
 
 			for (uint32_t p = 0; p < partionDepth; p++)
-				ppd[pixelID].partitioned = ppd[pixelID].trees[k].partition() || ppd[pixelID].partitioned; // Don not change the order, otherwise partition may be optimized out
+				ppd[pixelID].partitioned = ppd[pixelID].trees[k].partition(entropyThreshold) || ppd[pixelID].partitioned; // Don not change the order, otherwise partition may be optimized out
 			
 			ppd[pixelID].entropy += entropy;
 		}
@@ -973,22 +1030,14 @@ public:
 			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
-	
-		Matrix3x3 ltcW2l = GET_MAT3x3_IDENTITY;
-		Float amplitude = 1.0f;
-		Float ltcW2lDet = 1.0f;
-		Matrix3x3 rotMat = GET_MAT3x3_IDENTITY;
-		Spectrum diffuseComponent(0.0f);
-		Spectrum specularComponent(0.0f);
-
-		if (!getMatrices(prd, rotMat, ltcW2l, ltcW2lDet, amplitude, diffuseComponent, specularComponent))
+		else if (ppd.cosThetaIncident < 0)
 			return;
-
+	
 		ppd.entropy = 0;
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			float entropy = 0;
 			ppd.trees[i].computeEntropy(entropy);
-			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, rotMat, diffuseComponent, specularComponent);
+			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, ppd.rotMat, ppd.diffuseComponent, ppd.specularComponent);
 			ppd.entropy += entropy;
 		}
 	}
@@ -1000,7 +1049,8 @@ public:
 			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
-		const Scene *scene = rRec.scene;
+		else if (ppd.cosThetaIncident < 0)
+			return;
 		
 		/*for (uint32_t i = 0; i < emitterCount; i++) {
 			uint32_t samplesUsed = 0;
@@ -1043,43 +1093,11 @@ public:
 			ppd.samplesUsed += samplesUsed;
 		}*/
 				
-		Matrix3x3 ltcW2l = GET_MAT3x3_IDENTITY;
-		Float amplitude = 1.0f;
-		Float ltcW2lDet = 1.0f;
-		Matrix3x3 rotMat = GET_MAT3x3_IDENTITY;
-		Spectrum diffuseComponent(0.0f);
-		Spectrum specularComponent(0.0f);
-
-		if (!getMatrices(prd, rotMat, ltcW2l, ltcW2lDet, amplitude, diffuseComponent, specularComponent))
-			return;
+		
 
 		for (uint32_t i = 0; i < emitterCount; i++) {
-			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, rotMat, diffuseComponent, specularComponent);
+			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, ppd.rotMat, ppd.diffuseComponent, ppd.specularComponent);
 		}
-	}
-
-	bool getMatrices(const PrimaryRayData &prd, Matrix3x3 &rotMat, Matrix3x3 &ltcW2l, Float &ltcW2lDet, Float &amplitude, Spectrum &diffuseComponent, Spectrum &specularComponent)
-	{
-		ltcW2l = GET_MAT3x3_IDENTITY;
-		amplitude = 1.0f;
-		ltcW2lDet = 1.0f;
-		rotMat = GET_MAT3x3_IDENTITY;
-		Float cosThetaIncident;
-		Analytic::getRotMat(*prd.its, -prd.primaryRay->d, cosThetaIncident, rotMat);
-
-		if (cosThetaIncident < 0)
-			return false;
-
-		Float thetaIncident = std::acos(cosThetaIncident);
-		const BSDF *bsdf = ((prd.its)->getBSDF(*prd.primaryRay));
-		diffuseComponent = bsdf->getDiffuseReflectance(*prd.its);
-		specularComponent = Spectrum(0.0f);
-		if (!bsdf->isDiffuse()) {
-			bsdf->transform(*prd.its, thetaIncident, ltcW2l, amplitude);
-			specularComponent = bsdf->getSpecularReflectance(*prd.its);
-		}
-
-		return true;
 	}
 
 	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize)
@@ -1094,22 +1112,31 @@ public:
 				throughputPix[currPix] = pData.colorDirect;
 
 				// for unblurred results
-				//for (uint32_t k = 0; k < emitterCount; k++) {
-					//throughputPix[currPix] += pData.colorShaded[k];
-				//}
+				for (uint32_t k = 0; k < emitterCount; k++) {
+					throughputPix[currPix] += pData.colorShaded[k];
+				}
 				//throughputPix[currPix] = Spectrum(pData.samplesUsed / (emitterCount * 20.0f));
-				throughputPix[currPix] = Spectrum(pData.entropy / (emitterCount));
+				//throughputPix[currPix] = Spectrum(pData.entropy / (emitterCount));
 				//throughputPix[currPix] = Spectrum(pData.partitioned);
-				if (i > 0.75 * cropSize.x && i < 0.8 *cropSize.x)
-					if (j > 0.75 * cropSize.y && j < 0.8 *cropSize.y) {
-						throughputPix[currPix].fromLinearRGB(0, 1, 0);
-						if (i == 0.775 * cropSize.x && j == 0.775 * cropSize.y) {
-							pData.trees[0].dumpToFile("entropyData0.txt");
-							pData.trees[1].dumpToFile("entropyData1.txt");
-							std::cout << pData.entropy << std::endl;
-						}
-					}
 				
+				dumpToFile(Point2f(0.4f, 0.45f), Point2f(0.7f, 0.75f), cropSize, i, j, throughputPix[currPix], pData);
+			}
+	}
+
+	void dumpToFile(const Point2f &xLim, const Point2f &yLim, const Vector2i &cropSize, size_t i, size_t j, Spectrum &out, const PerPixelData &pData)
+	{
+		if (i > xLim.x * cropSize.x && i < xLim.y *cropSize.x)
+			if (j > yLim.x * cropSize.y && j < yLim.y *cropSize.y) {
+				out.fromLinearRGB(0, 1, 0);
+				Float xAvg = (xLim.x + xLim.y) / 2.0f;
+				Float yAvg = (yLim.x + yLim.y) / 2.0f;
+				//std::cout << xAvg * cropSize.x << " " << yAvg * cropSize.y << " " << i << " " << j << std::endl;
+				if (i == static_cast<size_t>(xAvg * cropSize.x) && j == static_cast<size_t>(yAvg * cropSize.y)) {
+					std::cout << pData.entropy << std::endl;
+					pData.trees[0].dumpToFile("../src/integrators/custom/entropy/entropyData0.txt");
+					pData.trees[1].dumpToFile("../src/integrators/custom/entropy/entropyData1.txt");
+
+				}
 			}
 	}
    
@@ -1164,3 +1191,16 @@ private:
 MTS_IMPLEMENT_CLASS_S(Entropy, false, Integrator)
 MTS_EXPORT_PLUGIN(Entropy, "Entropy");
 MTS_NAMESPACE_END
+
+/* Issues faced currently
+1. Too much partitioning when using plain entropy (i.e. only counting shadow samples only) - this is good when there is hardness in the shadow
+but we are wasting so much samples when the shadows are very soft.
+2. First step towards fixing 1, is to use set a threshold for partioning - however setting a uniform threshold across all pixels causes the region
+of hard shadows to become noisy.
+3. I think we should use area as the first criterion for partioning followed by entropy. This makes sense becasue when area is small the error in
+computing the shading is minimal. However, simply using the area would run into similar issues i.e. we would not split enough in the region
+of hard shaodws or split too much in the region of very soft shadows.
+4. To solve 3, we would need to intoroduce some concept maxError which is the approximate of shading value of each pixel due to the light source.
+However, as with 1,2,3 the question is what would be thereshold? Setting a fixed thresold will work for a given scene but we will need to change
+the threshold on a per scene basis? Or maybe not, if we also include radiance of the emitter?
+*/
