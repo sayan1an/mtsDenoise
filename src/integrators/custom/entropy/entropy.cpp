@@ -629,11 +629,21 @@ struct PerPixelData
 	EmitterTree *trees = nullptr;
 	Spectrum colorDirect;
 	Spectrum *colorShaded;
+
+	Float cosThetaIncident;
+	Vector wo; // In local coordinate of reciver normal
+	Matrix3x3 rotMat;
+	Matrix3x3 ltcW2l;
+	Float ltcW2lDet;
+	Float ltcAmplitude;
+	Spectrum diffuseComponent;
+	Spectrum specularComponent;
+
 	uint32_t samplesUsed; // For visualization only
 	float entropy; // For visualization only
 	bool partitioned; // For visualization only
 
-	void init(const BaseEmitter *emitters, const uint32_t numEmitters)
+	void init(const BaseEmitter *emitters, const uint32_t numEmitters, const PrimaryRayData &prd)
 	{
 		trees = new EmitterTree[numEmitters];
 		colorShaded = new Spectrum[numEmitters];
@@ -646,6 +656,35 @@ struct PerPixelData
 		entropy = 0;
 		partitioned = false;
 		colorDirect = Spectrum(0.0f);
+
+		cosThetaIncident = -1;
+		rotMat = GET_MAT3x3_IDENTITY;
+		wo = Vector(0.0f);
+		ltcW2l = GET_MAT3x3_IDENTITY;
+		ltcW2lDet = 1;
+		ltcAmplitude = 1;
+		diffuseComponent = Spectrum(0.0f);
+		specularComponent = Spectrum(0.0f);
+		
+		if (prd.objectId >= 0) {
+			Analytic::getRotMat(*prd.its, -prd.primaryRay->d, cosThetaIncident, rotMat);
+
+			if (cosThetaIncident < 0)
+				return;
+
+			wo = rotMat * (-prd.primaryRay->d);
+
+			const BSDF *bsdf = ((prd.its)->getBSDF(*prd.primaryRay));
+			diffuseComponent = bsdf->getDiffuseReflectance(*prd.its);
+			specularComponent = Spectrum(0.0f);
+
+			if (!bsdf->isDiffuse()) {
+				Float thetaIncident = std::acos(cosThetaIncident);
+				bsdf->transform(*prd.its, thetaIncident, ltcW2l, ltcAmplitude);
+				ltcW2lDet = ltcW2l.det();
+				specularComponent = bsdf->getSpecularReflectance(*prd.its);
+			}
+		}
 	}
 };
 
@@ -745,7 +784,7 @@ public:
 			gBufferPass(sensorRay, rRec, gBuffer[pixelID]);
             sampler->advance();
 
-			perPixelData[pixelID].init(emitters, emitterCount);
+			perPixelData[pixelID].init(emitters, emitterCount, gBuffer[pixelID]);
         });
 
 		std::cout << "Finished GBuffer pass." << std::endl;
@@ -906,6 +945,8 @@ public:
 	{
 		if (prd.objectId < 0)
 			return;
+		else if (ppd.cosThetaIncident < 0)
+			return;
 
 		const Scene *scene = rRec.scene;
 		for (uint32_t i = 0; i < emitterCount; i++) {
@@ -915,7 +956,10 @@ public:
 	}
 
 	void computeEntropy(PerPixelData &ppd, const Float &entropyThreshold) 
-	{	
+	{
+		if (ppd.cosThetaIncident < 0)
+			return;
+
 		ppd.partitioned = false;
 		ppd.entropy = 0;
 		for (uint32_t k = 0; k < emitterCount; k++) {
@@ -927,13 +971,15 @@ public:
 	}
 	
 	void computeEntropyCooperative(PrimaryRayData &prd, PerPixelData *ppd, int i, int j, const Vector2i &cropSize, std::vector<const EmitterTree *> &neighbours, const Float &entropyThreshold, uint32_t partionDepth = 1)
-	{
+	{	
+		int pixelID = j * cropSize.x + i;
 		if (prd.objectId < 0)
+			return;
+		else if (ppd[pixelID].cosThetaIncident < 0)
 			return;
 		
 		int neighbourPix[8];
-		int pixelID = j * cropSize.x + i;
-		
+				
 		neighbourPix[0] = (i + 1 < cropSize.x) ? j * cropSize.x + i + 1 : -1;
 		neighbourPix[1] = (i - 1 >= 0) ? j * cropSize.x + i - 1 : -1;
 		neighbourPix[2] = (j + 1 < cropSize.y) ? (j + 1) * cropSize.x + i : -1;
@@ -971,22 +1017,14 @@ public:
 			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
-	
-		Matrix3x3 ltcW2l = GET_MAT3x3_IDENTITY;
-		Float amplitude = 1.0f;
-		Float ltcW2lDet = 1.0f;
-		Matrix3x3 rotMat = GET_MAT3x3_IDENTITY;
-		Spectrum diffuseComponent(0.0f);
-		Spectrum specularComponent(0.0f);
-
-		if (!getMatrices(prd, rotMat, ltcW2l, ltcW2lDet, amplitude, diffuseComponent, specularComponent))
+		else if (ppd.cosThetaIncident < 0)
 			return;
-
+	
 		ppd.entropy = 0;
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			float entropy = 0;
 			ppd.trees[i].computeEntropy(entropy);
-			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, rotMat, diffuseComponent, specularComponent);
+			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, ppd.rotMat, ppd.diffuseComponent, ppd.specularComponent);
 			ppd.entropy += entropy;
 		}
 	}
@@ -998,7 +1036,8 @@ public:
 			ppd.colorDirect += prd.its->Le(-prd.primaryRay->d);
 			return;
 		}
-		const Scene *scene = rRec.scene;
+		else if (ppd.cosThetaIncident < 0)
+			return;
 		
 		/*for (uint32_t i = 0; i < emitterCount; i++) {
 			uint32_t samplesUsed = 0;
@@ -1040,46 +1079,12 @@ public:
 			ppd.entropy += entropy;
 			ppd.samplesUsed += samplesUsed;
 		}*/
-				
-		Matrix3x3 ltcW2l = GET_MAT3x3_IDENTITY;
-		Float amplitude = 1.0f;
-		Float ltcW2lDet = 1.0f;
-		Matrix3x3 rotMat = GET_MAT3x3_IDENTITY;
-		Spectrum diffuseComponent(0.0f);
-		Spectrum specularComponent(0.0f);
-
-		if (!getMatrices(prd, rotMat, ltcW2l, ltcW2lDet, amplitude, diffuseComponent, specularComponent))
-			return;
-
+		
 		for (uint32_t i = 0; i < emitterCount; i++) {
-			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, rotMat, diffuseComponent, specularComponent);
+			ppd.colorShaded[i] = ppd.trees[i].eval(prd.its->p, ppd.rotMat, ppd.diffuseComponent, ppd.specularComponent);
 		}
 	}
-
-	bool getMatrices(const PrimaryRayData &prd, Matrix3x3 &rotMat, Matrix3x3 &ltcW2l, Float &ltcW2lDet, Float &amplitude, Spectrum &diffuseComponent, Spectrum &specularComponent)
-	{
-		ltcW2l = GET_MAT3x3_IDENTITY;
-		amplitude = 1.0f;
-		ltcW2lDet = 1.0f;
-		rotMat = GET_MAT3x3_IDENTITY;
-		Float cosThetaIncident;
-		Analytic::getRotMat(*prd.its, -prd.primaryRay->d, cosThetaIncident, rotMat);
-
-		if (cosThetaIncident < 0)
-			return false;
-
-		Float thetaIncident = std::acos(cosThetaIncident);
-		const BSDF *bsdf = ((prd.its)->getBSDF(*prd.primaryRay));
-		diffuseComponent = bsdf->getDiffuseReflectance(*prd.its);
-		specularComponent = Spectrum(0.0f);
-		if (!bsdf->isDiffuse()) {
-			bsdf->transform(*prd.its, thetaIncident, ltcW2l, amplitude);
-			specularComponent = bsdf->getSpecularReflectance(*prd.its);
-		}
-
-		return true;
-	}
-
+	
 	void pBufferToImage(ref<Bitmap> &result, const PerPixelData *pBuffer, const Vector2i &cropSize)
 	{
 		Spectrum *throughputPix = (Spectrum *)result->getData();
