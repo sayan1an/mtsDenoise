@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-fileName = "entropyData1.txt"
+fileName = "right1.txt"
 
 f = open(fileName,"r")
 
@@ -47,4 +47,5 @@ for i in range(nSamples):
         plt.scatter(sample[0], sample[1], color="blue")
 
 plt.legend()
+plt.savefig(fileName[0:-3] + "png")
 plt.show()

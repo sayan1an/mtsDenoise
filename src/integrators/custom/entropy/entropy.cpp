@@ -27,6 +27,8 @@
 #include <thread>
 #include <fstream>
 
+#include <random>
+
 #include <mitsuba/core/lock.h>
 #include <mitsuba/core/thread.h>
 
@@ -150,6 +152,22 @@ private:
     ref<Mutex> mutex;
 };
 
+struct CppSampler
+{
+	std::default_random_engine generator;
+	std::uniform_real_distribution<float> distribution;
+
+	CppSampler(uint32_t sd)
+	{	
+		generator.seed(sd);
+		distribution = std::uniform_real_distribution<float>(0.0f, 1.0f);
+	}
+
+	float getSample()
+	{	
+		return distribution(generator);
+	}
+};
 struct EmitterTree;
 struct PerPixelData;
 
@@ -165,10 +183,10 @@ struct BaseEmitter
 {
 	Point vertexPositions[3];
 	Spectrum radiance;
-	Float area;
-	Normal normal;
-
-	Float evaluateOneEmitterSample(const Point2f &baryCoord, const Float &subArea, const Point3 &reciverPos, const Normal &reciverNormal, const PerPixelData &prd) const;
+	Float areaDiffuse;
+	Normal normalDiffuse;
+	
+	Float evaluateOneEmitterSample(const Point2f &baryCoord, const Point3 &reciverPos, const Normal &reciverNormal, const PerPixelData &ppd) const;
 };
 
 struct PerPixelData
@@ -185,6 +203,8 @@ struct PerPixelData
 	Float ltcAmplitude;
 	Spectrum diffuseComponent;
 	Spectrum specularComponent;
+	Float areaSpecular; // TODO: initialize
+	Normal normalSpecular; // TODO: intitialize
 
 	uint32_t samplesUsed; // For visualization only
 	float entropy; // For visualization only
@@ -322,14 +342,22 @@ struct EmitterNode
 		const Point2 &c = baryCoords[idx[2]];
 		Point2 centroid = (a + b + c) / 3;
 		
+		Float areaDiffuse = baseEmitter->areaDiffuse / static_cast<float>(std::pow(3.0f, depth));
 		Float centroidError = 
-			baseEmitter->evaluateOneEmitterSample(centroid, baseEmitter->area / static_cast<float>(std::pow(3.0f, depth)), 
-				receiverPos, reciverNormal, ppd);
+			baseEmitter->evaluateOneEmitterSample(centroid, receiverPos, reciverNormal, ppd);
 
+		//Float maxError = std::max(std::max(centroidError, maxErrors[idx[0]]), std::max(maxErrors[idx[1]], maxErrors[idx[2]]));
+		// maxError at this point in code should always be strictly greater than zero
+		// this is because if entropy is non-zero, that means there are some portion of light visible
+		// however, this is true only when entropy is computed non-cooperartively
+		//if (maxError * areaDiffuse < 0.001f)
+			//return false;
+		//std::cout << maxError * areaDiffuse << " " << depth << std::endl;
+		
 		uint32_t indexPivot = static_cast<uint32_t>(baryCoords.size());
 		// push the centroid as pivot for now
 		baryCoords.push_back(centroid);
-		maxErrors.push_back(centroidError);
+		//maxErrors.push_back(centroidError);
 		
 		nextNode[0] = new EmitterNode(indexPivot, idx[0], idx[1]);
 		nextNode[1] = new EmitterNode(indexPivot, idx[1], idx[2]);
@@ -508,7 +536,7 @@ struct EmitterTree
 		size_t newIndex = samples.size();
 
 		samplesUsed = static_cast<uint32_t>(newIndex - oldIndex);
-
+				
 		for (size_t i = oldIndex; i < newIndex; i++) {
 			// raytrace and update visibility.
 			// convert the light-samples from triangle-space to world space
@@ -569,9 +597,9 @@ struct EmitterTree
 		baryCoords.push_back(Point2(0, 1));
 		baryCoords.push_back(Point2(0, 0));
 		
-		maxErrors.push_back(baseEmitter->evaluateOneEmitterSample(baryCoords[0], baseEmitter->area, reciverPos, reciverNormal, ppd));
-		maxErrors.push_back(baseEmitter->evaluateOneEmitterSample(baryCoords[1], baseEmitter->area, reciverPos, reciverNormal, ppd));
-		maxErrors.push_back(baseEmitter->evaluateOneEmitterSample(baryCoords[2], baseEmitter->area, reciverPos, reciverNormal, ppd));
+		maxErrors.push_back(baseEmitter->evaluateOneEmitterSample(baryCoords[0], reciverPos, reciverNormal, ppd));
+		maxErrors.push_back(baseEmitter->evaluateOneEmitterSample(baryCoords[1], reciverPos, reciverNormal, ppd));
+		maxErrors.push_back(baseEmitter->evaluateOneEmitterSample(baryCoords[2], reciverPos, reciverNormal, ppd));
 		
 		root = new EmitterNode(0, 1, 2);
 	}
@@ -604,7 +632,7 @@ struct EmitterTree
 	}
 };
 
-Float BaseEmitter::evaluateOneEmitterSample(const Point2f &baryCoord, const Float &subArea, const Point3 &reciverPos, const Normal &reciverNormal, const PerPixelData &ppd) const
+Float BaseEmitter::evaluateOneEmitterSample(const Point2f &baryCoord, const Point3 &reciverPos, const Normal &reciverNormal, const PerPixelData &ppd) const
 {
 	Point3 worldSpacePosition = baryCoord.x * vertexPositions[0] +
 		baryCoord.y * vertexPositions[1] +
@@ -620,10 +648,10 @@ Float BaseEmitter::evaluateOneEmitterSample(const Point2f &baryCoord, const Floa
 	direction /= length;
 
 	// TODO:: Fix the abs
-	Float cosThetaEmitter = abs(dot(-direction, normal));
+	Float cosThetaEmitterDiffuse = abs(dot(-direction, normalDiffuse));
 	
 	// TODO:: add specular component
-	return radiance.max() * cosThetaIncident * cosThetaEmitter * ppd.diffuseComponent.max() * subArea / (length * length * M_PI) ;
+	return radiance.max() * cosThetaIncident * cosThetaEmitterDiffuse * ppd.diffuseComponent.max() / (length * length * M_PI) ;
 
 }
 
@@ -833,13 +861,13 @@ public:
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 			sampler->generate(Point2i(i, j));
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 3);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 20);
 			sampler->advance();
 		});
 
 		std::cout << "Finished initial sampling pass." << std::endl;
 
-		runPool.run([&](int pixelID, int threadID) {
+		/*runPool.run([&](int pixelID, int threadID) {
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 		
@@ -873,7 +901,7 @@ public:
 			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 0.4f);
 		});
 
-		std::cout << "Finished next cooperative-entropy pass." << std::endl;
+		std::cout << "Finished next cooperative-entropy pass." << std::endl;*/
 		
 		runPool.run([&](int pixelID, int threadID) {
 			ThreadData &td = threadData[threadID];
@@ -882,19 +910,19 @@ public:
 
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
-			sampler->generate(Point2i(i, j));
+			/*sampler->generate(Point2i(i, j));
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			/*computeEntropy(perPixelData[pixelID]);
+			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);*/
+			/*computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
+			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
+			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
+			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(perPixelData[pixelID]);
+			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);*/
 			shadeAnalytic(gBuffer[pixelID], perPixelData[pixelID]);
 			sampler->advance();
@@ -947,11 +975,11 @@ public:
 					emitters[numEmitters].vertexPositions[1] = vertexPositions[triangles[i].idx[1]];
 					emitters[numEmitters].vertexPositions[2] = vertexPositions[triangles[i].idx[0]];
 					emitters[numEmitters].radiance = emitter->getRadiance();
-					emitters[numEmitters].normal = cross(emitters[numEmitters].vertexPositions[1] - emitters[numEmitters].vertexPositions[0],
+					emitters[numEmitters].normalDiffuse = cross(emitters[numEmitters].vertexPositions[1] - emitters[numEmitters].vertexPositions[0],
 						emitters[numEmitters].vertexPositions[2] - emitters[numEmitters].vertexPositions[0]);
-					emitters[numEmitters].area = emitters[numEmitters].normal.length();
-					emitters[numEmitters].normal /= emitters[numEmitters].area;
-					emitters[numEmitters].area *= 0.5f;
+					emitters[numEmitters].areaDiffuse = emitters[numEmitters].normalDiffuse.length();
+					emitters[numEmitters].normalDiffuse /= emitters[numEmitters].areaDiffuse;
+					emitters[numEmitters].areaDiffuse *= 0.5f;
 					numEmitters++;
 				}
 			}
@@ -990,9 +1018,11 @@ public:
 			return;
 
 		const Scene *scene = rRec.scene;
+		//CppSampler sampler(static_cast<uint32_t>(rRec.sampler->next1D() * 100000));
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			uint32_t samplesUsed = 0;
 			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, samplesUsed, nSamples);
+			ppd.samplesUsed += samplesUsed;
 		}
 	}
 
@@ -1141,15 +1171,18 @@ public:
 				for (uint32_t k = 0; k < emitterCount; k++) {
 					throughputPix[currPix] += pData.colorShaded[k];
 				}
+				
 				//throughputPix[currPix] = Spectrum(pData.samplesUsed / (emitterCount * 20.0f));
 				//throughputPix[currPix] = Spectrum(pData.entropy / (emitterCount));
 				//throughputPix[currPix] = Spectrum(pData.partitioned);
-				dumpToFile(Point2f(0.4f, 0.45f), Point2f(0.7f, 0.75f), cropSize, i, j, throughputPix[currPix], pData);
+				//dumpToFile(Point2f(0.4f, 0.45f), Point2f(0.7f, 0.75f), cropSize, i, j, throughputPix[currPix], pData);
 				
+				dumpToFile("left", Point2f(0.4f + 0.025f, 0.45f + 0.025f), Point2f(0.7f - 0.25f, 0.75f - 0.25f), cropSize, i, j, throughputPix[currPix], pData);
+				dumpToFile("right", Point2f(0.4f+0.125f, 0.45f+0.125f), Point2f(0.7f - 0.25f, 0.75f - 0.25f), cropSize, i, j, throughputPix[currPix], pData);
 			}
 	}
 
-	void dumpToFile(const Point2f &xLim, const Point2f &yLim, const Vector2i &cropSize, size_t i, size_t j, Spectrum &out, const PerPixelData &pData)
+	void dumpToFile(const std::string fName, const Point2f &xLim, const Point2f &yLim, const Vector2i &cropSize, size_t i, size_t j, Spectrum &out, const PerPixelData &pData)
 	{
 		if (i > xLim.x * cropSize.x && i < xLim.y *cropSize.x)
 			if (j > yLim.x * cropSize.y && j < yLim.y *cropSize.y) {
@@ -1159,8 +1192,8 @@ public:
 				//std::cout << xAvg * cropSize.x << " " << yAvg * cropSize.y << " " << i << " " << j << std::endl;
 				if (i == static_cast<size_t>(xAvg * cropSize.x) && j == static_cast<size_t>(yAvg * cropSize.y)) {
 					std::cout << pData.entropy << std::endl;
-					pData.trees[0].dumpToFile("../src/integrators/custom/entropy/entropyData0.txt");
-					pData.trees[1].dumpToFile("../src/integrators/custom/entropy/entropyData1.txt");
+					pData.trees[0].dumpToFile("../src/integrators/custom/entropy/" + fName + "0.txt");
+					pData.trees[1].dumpToFile("../src/integrators/custom/entropy/" + fName + "1.txt");
 
 				}
 			}
@@ -1168,7 +1201,7 @@ public:
    
 	void gBufferToImage(ref<Bitmap> &result, const PrimaryRayData *gBuffer, const Vector2i &cropSize) 
 	{
-		int select = 1;
+		int select = 0;
 
 		Spectrum *throughputPix = (Spectrum *)result->getData();
 		Spectrum value(0.0f);
@@ -1181,7 +1214,7 @@ public:
 				if (prd.objectId < 0)
 					continue;
 				if (select == 0)
-					value.fromLinearRGB(prd.its->shFrame.n.x, prd.its->shFrame.n.y, prd.its->shFrame.n.z);
+					value.fromLinearRGB(abs(prd.its->shFrame.n.x), abs(prd.its->shFrame.n.y), abs(prd.its->shFrame.n.z));
 				else if (select == 1)
 					value = prd.its->getBSDF(*prd.primaryRay)->getDiffuseReflectance(*prd.its);
 				else if (select == 2)

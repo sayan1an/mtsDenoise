@@ -1,0 +1,29 @@
+                <meta charset="utf-8" emacsmode="-*- markdown -*-">
+                            **Why there is anisotropy?**
+
+Where is anisotropy?
+===============================================================================
+![](entropy.png)
+
+Looking at the above image, we see that variance in the right-green patch is lower than the left green patch. Also, the variance on the floor is somewhat along one of the diagonals of the light light source.
+
+Cause of anisotropy?
+===============================================================================
+![](lightSource.png)
+
+Note that the square light source is composed of two triangles split along the AC axis. This partition is not symetric i.e. partition along AC axis is not same as along BD.
+
+Let's look at the sampling at the pixels over left and right green patch
+
+| Triangle  | Left green patch | Right green patch |
+|-----------|------------------|-------------------|
+|  0        | ![](left0.png)   | ![](right0.png)   |
+|  1        | ![](left1.png)   | ![](right1.png)   |
+| assmebled | ![](left.png)    | ![](right.png)    |
+
+Note that, depending on the alignment of the shadow-unshadow partioning axis i.e. whether shadow partioning axis is aligned with the AC or not we have lower or higher variance. On the right, the partioning axis is aligned with AC, hence variance is lower on the right side.  Whereas on left, the partion axis is almost orthogonal, causing more variance.
+
+
+
+
+<!-- Markdeep: --><style class="fallback">body{visibility:hidden;white-space:pre;font-family:monospace}</style><script src="markdeep.min.js"></script><script src="https://casual-effects.com/markdeep/latest/markdeep.min.js"></script><script>window.alreadyProcessedMarkdeep||(document.body.style.visibility="visible")</script>
