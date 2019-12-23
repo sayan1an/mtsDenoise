@@ -265,36 +265,40 @@ struct EmitterNode
 				return;
 		}
 		
-		// Note that we do not do any rejection sampling to reject the samples below the horizon.
+		const uint32_t min_samplesAboveHorizon = 1;
+		uint32_t samplesAboveHorizonCtr = 0;
 		// We do not need to consider the samples below horizon as they should not participate in computation of entropy. This is because
 		// we only evaluate the light source after it is clipped by the normal plane.
-		for (uint32_t i = 0; i < maxSamples; i++) {
-			Point2f rSample = sampler->next2D();
-			Float sample1 = sqrt(rSample.x);
-			const Point2f p = a * (1.0f - sample1) + b * sample1 * rSample.y +
-				c * sample1 * (1.0f - rSample.y);
+		// However we do rejection sampling, such that we have at least some samples above horzion.
+		while (samplesAboveHorizonCtr < min_samplesAboveHorizon) {
+			for (uint32_t i = 0; i < maxSamples; i++) {
+				Point2f rSample = sampler->next2D();
+				Float sample1 = sqrt(rSample.x);
+				const Point2f p = a * (1.0f - sample1) + b * sample1 * rSample.y +
+					c * sample1 * (1.0f - rSample.y);
 
-			Vector worldSpaceDirection = (p.x * emitter->vertexPositions[0] + p.y * emitter->vertexPositions[1] + (1 - p.x - p.y) *  emitter->vertexPositions[2])
-				- reciverPos;
+				Vector worldSpaceDirection = (p.x * emitter->vertexPositions[0] + p.y * emitter->vertexPositions[1] + (1 - p.x - p.y) *  emitter->vertexPositions[2])
+					- reciverPos;
 
-			if (dot(worldSpaceDirection, reciverNormal) < 0)
-				continue;
+				if (dot(worldSpaceDirection, reciverNormal) < 0)
+					continue;
 
-			Float length = worldSpaceDirection.length();
-			worldSpaceDirection /= length;
+				Float length = worldSpaceDirection.length();
+				worldSpaceDirection /= length;
 
-			RayDifferential shadowRay(reciverPos, worldSpaceDirection, 0);
-			shadowRay.mint = Epsilon;
-			shadowRay.maxt = length * (1 - ShadowEpsilon);
+				RayDifferential shadowRay(reciverPos, worldSpaceDirection, 0);
+				shadowRay.mint = Epsilon;
+				shadowRay.maxt = length * (1 - ShadowEpsilon);
 
-			if (scene->rayIntersect(shadowRay))
-				visibility.push_back(false);
-			else
-				visibility.push_back(true);
+				if (scene->rayIntersect(shadowRay))
+					visibility.push_back(false);
+				else
+					visibility.push_back(true);
 
-			samples.push_back(p);
+				samples.push_back(p);
+				samplesAboveHorizonCtr++;
+			}
 		}
-				
 		// compute the vertices of the adaptive-trinagle in world space
 		/*const Point3 worldSpaceVertex0 = a.x * emitter->vertexPositions[0] + a.y * emitter->vertexPositions[1] + (1 - a.x - a.y) *  emitter->vertexPositions[2];
 		const Point3 worldSpaceVertex1 = b.x * emitter->vertexPositions[0] + b.y * emitter->vertexPositions[1] + (1 - b.x - b.y) *  emitter->vertexPositions[2];
@@ -867,7 +871,7 @@ public:
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 			sampler->generate(Point2i(i, j));
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 20);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 3);
 			sampler->advance();
 		});
 
@@ -1183,8 +1187,8 @@ public:
 				//throughputPix[currPix] = Spectrum(pData.partitioned);
 				//dumpToFile(Point2f(0.4f, 0.45f), Point2f(0.7f, 0.75f), cropSize, i, j, throughputPix[currPix], pData);
 				
-				dumpToFile("left", Point2f(0.4f + 0.025f, 0.45f + 0.025f), Point2f(0.7f - 0.25f, 0.75f - 0.25f), cropSize, i, j, throughputPix[currPix], pData);
-				dumpToFile("right", Point2f(0.4f+0.125f, 0.45f+0.125f), Point2f(0.7f - 0.25f, 0.75f - 0.25f), cropSize, i, j, throughputPix[currPix], pData);
+				dumpToFile("left", Point2f(0.4f + 0.025f, 0.45f + 0.025f), Point2f(0.7f - 0.15f, 0.75f - 0.15f), cropSize, i, j, throughputPix[currPix], pData);
+				dumpToFile("right", Point2f(0.4f+0.125f, 0.45f+0.125f), Point2f(0.7f - 0.15f, 0.75f - 0.15f), cropSize, i, j, throughputPix[currPix], pData);
 			}
 	}
 
