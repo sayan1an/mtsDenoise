@@ -226,15 +226,15 @@ struct EmitterNode
 	uint32_t nBlack; // find this in computeEntropy, use only current pixel values;
 	uint32_t nWhite; // find this in computeEntropy, use only current pixel values;
 	
-	void sample(const std::vector<Point2> &baryCoords, Sampler *sampler, std::vector<Point2> &samples, const BaseEmitter *emitter, uint32_t maxSamples)
+	void sample(const Scene *scene, const std::vector<Point2> &baryCoords, Sampler *sampler, std::vector<Point2> &samples, std::vector<bool> &visibility, const BaseEmitter *emitter, const Normal &reciverNormal, const Point &reciverPos, uint32_t maxSamples)
 	{	
 		// recurse to leaf node
 		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
 		if (allNullPtr == 0) {
 			// recurse to leaf node
-			nextNode[0]->sample(baryCoords, sampler, samples, emitter, maxSamples);
-			nextNode[1]->sample(baryCoords, sampler, samples, emitter, maxSamples);
-			nextNode[2]->sample(baryCoords, sampler, samples, emitter, maxSamples);
+			nextNode[0]->sample(scene, baryCoords, sampler, samples, visibility, emitter, reciverNormal, reciverPos, maxSamples);
+			nextNode[1]->sample(scene, baryCoords, sampler, samples, visibility, emitter, reciverNormal, reciverPos, maxSamples);
+			nextNode[2]->sample(scene, baryCoords, sampler, samples, visibility, emitter, reciverNormal, reciverPos, maxSamples);
 
 			return;
 		}
@@ -247,16 +247,52 @@ struct EmitterNode
 		if (sampled)
 			return;
 
+		sampled = true;
+
 		const Point2 &a = baryCoords[idx[0]];
 		const Point2 &b = baryCoords[idx[1]];
 		const Point2 &c = baryCoords[idx[2]];
+
+		// Preempt sampling if all vertices of the sub-emitter are below horizon
+		{
+			const Point3 worldSpaceVertex0 = a.x * emitter->vertexPositions[0] + a.y * emitter->vertexPositions[1] + (1 - a.x - a.y) *  emitter->vertexPositions[2];
+			const Point3 worldSpaceVertex1 = b.x * emitter->vertexPositions[0] + b.y * emitter->vertexPositions[1] + (1 - b.x - b.y) *  emitter->vertexPositions[2];
+			const Point3 worldSpaceVertex2 = c.x * emitter->vertexPositions[0] + c.y * emitter->vertexPositions[1] + (1 - c.x - c.y) *  emitter->vertexPositions[2];
+			
+			if (dot(worldSpaceVertex0 - reciverPos, reciverNormal) < 0 &&
+				dot(worldSpaceVertex1 - reciverPos, reciverNormal) < 0 &&
+				dot(worldSpaceVertex2 - reciverPos, reciverNormal) < 0)
+				return;
+		}
 		
+		// Note that we do not do any rejection sampling to reject the samples below the horizon.
+		// We do not need to consider the samples below horizon as they should not participate in computation of entropy. This is because
+		// we only evaluate the light source after it is clipped by the normal plane.
 		for (uint32_t i = 0; i < maxSamples; i++) {
 			Point2f rSample = sampler->next2D();
 			Float sample1 = sqrt(rSample.x);
+			const Point2f p = a * (1.0f - sample1) + b * sample1 * rSample.y +
+				c * sample1 * (1.0f - rSample.y);
 
-			samples.push_back(a * (1.0f - sample1) + b * sample1 * rSample.y +
-				c * sample1 * (1.0f - rSample.y));
+			Vector worldSpaceDirection = (p.x * emitter->vertexPositions[0] + p.y * emitter->vertexPositions[1] + (1 - p.x - p.y) *  emitter->vertexPositions[2])
+				- reciverPos;
+
+			if (dot(worldSpaceDirection, reciverNormal) < 0)
+				continue;
+
+			Float length = worldSpaceDirection.length();
+			worldSpaceDirection /= length;
+
+			RayDifferential shadowRay(reciverPos, worldSpaceDirection, 0);
+			shadowRay.mint = Epsilon;
+			shadowRay.maxt = length * (1 - ShadowEpsilon);
+
+			if (scene->rayIntersect(shadowRay))
+				visibility.push_back(false);
+			else
+				visibility.push_back(true);
+
+			samples.push_back(p);
 		}
 				
 		// compute the vertices of the adaptive-trinagle in world space
@@ -276,8 +312,6 @@ struct EmitterNode
 			barycentric(p, emitter->vertexPositions[0], emitter->vertexPositions[1], emitter->vertexPositions[2], bary);
 			samples.push_back(bary);
 		}*/
-
-		sampled = true;
 	}
 
 	void testSampling(const std::vector<Point2> &baryCoords, const std::vector<Point2> &samples)
@@ -532,38 +566,10 @@ struct EmitterTree
 	void sample(const Scene *scene, Sampler *sampler, const Normal &reciverNormal, const Point3 &reciverPos, uint32_t &samplesUsed, uint32_t maxSamples = 1)
 	{	
 		size_t oldIndex = samples.size();
-		root->sample(baryCoords, sampler, samples, baseEmitter, maxSamples);
+		root->sample(scene, baryCoords, sampler, samples, visibility, baseEmitter, reciverNormal, reciverPos, maxSamples);
 		size_t newIndex = samples.size();
 
 		samplesUsed = static_cast<uint32_t>(newIndex - oldIndex);
-				
-		for (size_t i = oldIndex; i < newIndex; i++) {
-			// raytrace and update visibility.
-			// convert the light-samples from triangle-space to world space
-			const Point2f &baryCord = samples[i];
-			Point3 worldSpacePosition = baryCord.x * baseEmitter->vertexPositions[0] + 
-				baryCord.y * baseEmitter->vertexPositions[1] + 
-				(1 - baryCord.x - baryCord.y) *  baseEmitter->vertexPositions[2];
-
-			Vector direction = worldSpacePosition - reciverPos;
-
-			if (dot(reciverNormal, direction) < 0) {
-				visibility.push_back(false);
-				continue;
-			}
-
-			Float length = direction.length();
-			direction /= length;
-
-			RayDifferential shadowRay(reciverPos, direction, 0);
-			shadowRay.mint = Epsilon;
-			shadowRay.maxt = length * (1 - ShadowEpsilon);
-			
-			if (scene->rayIntersect(shadowRay))
-				visibility.push_back(false);
-			else
-				visibility.push_back(true);
-		}
 	}
 
 	void testSampling()
