@@ -23,6 +23,10 @@ Let's look at the sampling at the pixels over left and right green patch
 
 Note that, depending on the alignment of the shadow-unshadow partioning axis i.e. whether shadow partioning axis is aligned with the AC or not we have lower or higher variance. On the right, the partioning axis is aligned with AC, hence variance is lower on the right side.  Whereas on left, the partion axis is almost orthogonal, causing more variance.
 
+How to fix
+=================================================================================
+There is no way to fix the anisotropy on the floor. However, we can fix the anisotropy over the two green patches by simply considering the samples above horizon for computing the entropy. This works becasue we clip the polygon before evaluation and only the samples within the clipped polygon should be used for computing entropy.
+
 
 
 
