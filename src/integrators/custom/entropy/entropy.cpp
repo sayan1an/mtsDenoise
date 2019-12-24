@@ -267,10 +267,11 @@ struct EmitterNode
 		
 		const uint32_t min_samplesAboveHorizon = 1;
 		uint32_t samplesAboveHorizonCtr = 0;
+		int maxTries = 50;
 		// We do not need to consider the samples below horizon as they should not participate in computation of entropy. This is because
 		// we only evaluate the light source after it is clipped by the normal plane.
 		// However we do rejection sampling, such that we have at least some samples above horzion.
-		while (samplesAboveHorizonCtr < min_samplesAboveHorizon) {
+		while (samplesAboveHorizonCtr < min_samplesAboveHorizon && maxTries-- >= 0) {
 			for (uint32_t i = 0; i < maxSamples; i++) {
 				Point2f rSample = sampler->next2D();
 				Float sample1 = sqrt(rSample.x);
@@ -384,18 +385,18 @@ struct EmitterNode
 		Float centroidError = 
 			baseEmitter->evaluateOneEmitterSample(centroid, receiverPos, reciverNormal, ppd);
 
-		//Float maxError = std::max(std::max(centroidError, maxErrors[idx[0]]), std::max(maxErrors[idx[1]], maxErrors[idx[2]]));
+		Float maxError = std::max(std::max(centroidError, maxErrors[idx[0]]), std::max(maxErrors[idx[1]], maxErrors[idx[2]]));
 		// maxError at this point in code should always be strictly greater than zero
 		// this is because if entropy is non-zero, that means there are some portion of light visible
 		// however, this is true only when entropy is computed non-cooperartively
-		//if (maxError * areaDiffuse < 0.001f)
-			//return false;
+		if (maxError * areaDiffuse < 0.001f)
+			return false;
 		//std::cout << maxError * areaDiffuse << " " << depth << std::endl;
 		
 		uint32_t indexPivot = static_cast<uint32_t>(baryCoords.size());
 		// push the centroid as pivot for now
 		baryCoords.push_back(centroid);
-		//maxErrors.push_back(centroidError);
+		maxErrors.push_back(centroidError);
 		
 		nextNode[0] = new EmitterNode(indexPivot, idx[0], idx[1]);
 		nextNode[1] = new EmitterNode(indexPivot, idx[1], idx[2]);
@@ -877,7 +878,7 @@ public:
 
 		std::cout << "Finished initial sampling pass." << std::endl;
 
-		/*runPool.run([&](int pixelID, int threadID) {
+		runPool.run([&](int pixelID, int threadID) {
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 		
@@ -911,7 +912,7 @@ public:
 			computeEntropyCooperative(gBuffer[pixelID], perPixelData, i, j, cropSize, tree, 0.4f);
 		});
 
-		std::cout << "Finished next cooperative-entropy pass." << std::endl;*/
+		std::cout << "Finished next cooperative-entropy pass." << std::endl;
 		
 		runPool.run([&](int pixelID, int threadID) {
 			ThreadData &td = threadData[threadID];
@@ -920,11 +921,7 @@ public:
 
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
-			/*sampler->generate(Point2i(i, j));
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);*/
-			/*computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
+			sampler->generate(Point2i(i, j));
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
@@ -933,7 +930,11 @@ public:
 			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
 			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);*/
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
+			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
 			shadeAnalytic(gBuffer[pixelID], perPixelData[pixelID]);
 			sampler->advance();
 
@@ -1187,8 +1188,8 @@ public:
 				//throughputPix[currPix] = Spectrum(pData.partitioned);
 				//dumpToFile(Point2f(0.4f, 0.45f), Point2f(0.7f, 0.75f), cropSize, i, j, throughputPix[currPix], pData);
 				
-				dumpToFile("left", Point2f(0.4f + 0.025f, 0.45f + 0.025f), Point2f(0.7f - 0.15f, 0.75f - 0.15f), cropSize, i, j, throughputPix[currPix], pData);
-				dumpToFile("right", Point2f(0.4f+0.125f, 0.45f+0.125f), Point2f(0.7f - 0.15f, 0.75f - 0.15f), cropSize, i, j, throughputPix[currPix], pData);
+				dumpToFile("left", Point2f(0.4f + 0.025f, 0.45f + 0.025f), Point2f(0.7f + 0.2f, 0.75f + 0.2f), cropSize, i, j, throughputPix[currPix], pData);
+				dumpToFile("right", Point2f(0.4f+0.125f, 0.45f+0.125f), Point2f(0.7f + 0.2f, 0.75f + 0.2f), cropSize, i, j, throughputPix[currPix], pData);
 			}
 	}
 
