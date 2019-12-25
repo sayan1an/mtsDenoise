@@ -2,8 +2,7 @@
 
 <scene version="0.6.0" >
 	<integrator type="entropy"></integrator>
-	
-	<!--
+	<!--	
 	<integrator type="direct">
 		<integer name="emitterSamples" value="600"/>
 		<integer name="bsdfSamples" value="0"/>

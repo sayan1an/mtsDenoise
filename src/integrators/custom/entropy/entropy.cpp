@@ -394,7 +394,7 @@ struct EmitterNode
 		// maxError at this point in code should always be strictly greater than zero
 		// this is because if entropy is non-zero, that means there are some portion of light visible
 		// however, this is true only when entropy is computed non-cooperartively
-		if (maxError * areaDiffuse < 0.1f)
+		if (maxError * areaDiffuse < 0.05f)
 			return false;
 		//std::cout << maxError * areaDiffuse << " " << depth << std::endl;
 		
@@ -828,8 +828,8 @@ public:
         std::vector<ThreadData> threadData;
         for(auto i = 0; i < nCores; i++) {
             threadData.emplace_back(ThreadData {
-                    new  DefaultSampler(sampler_main->clone())
-				//new  PoissionDiscSampler(0.25, 10)
+                //    new  DefaultSampler(sampler_main->clone())
+				new  PoissionDiscSampler(0.1, 10)
             });
         }
 
