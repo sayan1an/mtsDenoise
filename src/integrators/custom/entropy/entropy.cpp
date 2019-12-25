@@ -33,6 +33,7 @@
 #include <mitsuba/core/thread.h>
 
 #include "analytic.h"
+#include "lowDiscrepancySampler.h"
 
 MTS_NAMESPACE_BEGIN
 
@@ -226,7 +227,7 @@ struct EmitterNode
 	uint32_t nBlack; // find this in computeEntropy, use only current pixel values;
 	uint32_t nWhite; // find this in computeEntropy, use only current pixel values;
 	
-	void sample(const Scene *scene, const std::vector<Point2> &baryCoords, Sampler *sampler, std::vector<Point2> &samples, std::vector<bool> &visibility, const BaseEmitter *emitter, const Normal &reciverNormal, const Point &reciverPos, uint32_t maxSamples)
+	void sample(const Scene *scene, const std::vector<Point2> &baryCoords, BaseSampler *sampler, std::vector<Point2> &samples, std::vector<bool> &visibility, const BaseEmitter *emitter, const Normal &reciverNormal, const Point &reciverPos, uint32_t maxSamples)
 	{	
 		// recurse to leaf node
 		uint32_t allNullPtr = (nextNode[0] == nullptr) + (nextNode[1] == nullptr) + (nextNode[2] == nullptr);
@@ -273,7 +274,7 @@ struct EmitterNode
 		// However we do rejection sampling, such that we have at least some samples above horzion.
 		while (samplesAboveHorizonCtr < min_samplesAboveHorizon && maxTries-- >= 0) {
 			for (uint32_t i = 0; i < maxSamples; i++) {
-				Point2f rSample = sampler->next2D();
+				Point2f rSample = sampler->nextSquare();
 				Float sample1 = sqrt(rSample.x);
 				const Point2f p = a * (1.0f - sample1) + b * sample1 * rSample.y +
 					c * sample1 * (1.0f - rSample.y);
@@ -568,7 +569,7 @@ struct EmitterTree
 	// This will recursively get 1 sample at each leaf node
 	// put the bary-coord of sample in baryCoords
 	// put the visibility in visibility 
-	void sample(const Scene *scene, Sampler *sampler, const Normal &reciverNormal, const Point3 &reciverPos, uint32_t &samplesUsed, uint32_t maxSamples = 1)
+	void sample(const Scene *scene, BaseSampler *sampler, const Normal &reciverNormal, const Point3 &reciverPos, uint32_t &samplesUsed, uint32_t maxSamples = 1)
 	{	
 		size_t oldIndex = samples.size();
 		root->sample(scene, baryCoords, sampler, samples, visibility, baseEmitter, reciverNormal, reciverPos, maxSamples);
@@ -817,48 +818,47 @@ public:
         result->clear();
 
         struct ThreadData {
-            ref<Sampler> sampler;
+			BaseSampler *sampler = nullptr;
         };
 
         std::vector<ThreadData> threadData;
         for(auto i = 0; i < nCores; i++) {
             threadData.emplace_back(ThreadData {
-                    sampler_main->clone()
+                    new  DefaultSampler(sampler_main->clone())
             });
         }
 
         BlockScheduler runPool(cropSize.x * cropSize.y, (int)nCores, 1);
         runPool.run([&](int pixelID, int threadID) {
 			ThreadData &td = threadData[threadID];
-			auto sampler = td.sampler.get();
+			BaseSampler *sampler = td.sampler;
 
             bool needsApertureSample = sensor->needsApertureSample();
             bool needsTimeSample = sensor->needsTimeSample();
 
-            RadianceQueryRecord rRec(scene, sampler);
+			RadianceQueryRecord rRec(scene, nullptr);
             Point2 apertureSample(0.5f);
             Float timeSample = 0.5f;
             RayDifferential sensorRay;
             uint32_t queryType = RadianceQueryRecord::ESensorRay;
-
+			rRec.newQuery(queryType, sensor->getMedium());
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
-
+			
             Point2i offset = Point2i(i, j);
-			sampler->generate(offset);
+			
+			sampler->seed(offset);
+			
+            Point2 samplePos(Point2(offset) + Vector2(sampler->nextSquare()));
 
-			rRec.newQuery(queryType, sensor->getMedium());
-            Point2 samplePos(Point2(offset) + Vector2(rRec.nextSample2D()));
-
-            if (needsApertureSample)
-				apertureSample = rRec.nextSample2D();
+			if (needsApertureSample)
+				apertureSample = sampler->nextSquare();
             if (needsTimeSample)
-                timeSample = rRec.nextSample1D();
+                timeSample = sampler->next1D();
 			sensor->sampleRayDifferential(
 				sensorRay, samplePos, apertureSample, timeSample);
 			gBufferPass(sensorRay, rRec, gBuffer[pixelID]);
-            sampler->advance();
-
+           
 			perPixelData[pixelID].init(emitters, emitterCount, gBuffer[pixelID]);
         });
 
@@ -866,14 +866,13 @@ public:
 
 		runPool.run([&](int pixelID, int threadID) {
 			ThreadData &td = threadData[threadID];
-			auto sampler = td.sampler.get();
-			RadianceQueryRecord rRec(scene, sampler);
+			auto sampler = td.sampler;
+			RadianceQueryRecord rRec(scene, nullptr);
 
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
-			sampler->generate(Point2i(i, j));
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 3);
-			sampler->advance();
+			sampler->seed(Point2i(i, j));
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 3);
 		});
 
 		std::cout << "Finished initial sampling pass." << std::endl;
@@ -891,14 +890,13 @@ public:
 
 		runPool.run([&](int pixelID, int threadID) {
 			ThreadData &td = threadData[threadID];
-			auto sampler = td.sampler.get();
-			RadianceQueryRecord rRec(scene, sampler);
+			auto sampler = td.sampler;
+			RadianceQueryRecord rRec(scene, nullptr);
 
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
-			sampler->generate(Point2i(i, j));
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
-			sampler->advance();
+			sampler->seed(Point2i(i, j));
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 2);
 		});
 
 		std::cout << "Finished next sampling pass." << std::endl;
@@ -916,28 +914,26 @@ public:
 		
 		runPool.run([&](int pixelID, int threadID) {
 			ThreadData &td = threadData[threadID];
-			auto sampler = td.sampler.get();
-			RadianceQueryRecord rRec(scene, sampler);
+			auto sampler = td.sampler;
+			RadianceQueryRecord rRec(scene, nullptr);
 
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
-			sampler->generate(Point2i(i, j));
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			sampler->seed(Point2i(i, j));
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 2);
 			computeEntropy(gBuffer[pixelID], perPixelData[pixelID], 0.4f);
-			sample(rRec, gBuffer[pixelID], perPixelData[pixelID], 2);
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 2);
 			shadeAnalytic(gBuffer[pixelID], perPixelData[pixelID]);
-			sampler->advance();
-
 		});
 
 		std::cout << "Finished final sampling-shading pass." << std::endl;
@@ -1021,7 +1017,7 @@ public:
 		prd.objectId = 0;
     }
 
-	void sample(RadianceQueryRecord &rRec, PrimaryRayData &prd, PerPixelData &ppd, uint32_t nSamples = 1)
+	void sample(RadianceQueryRecord &rRec, BaseSampler *sampler, PrimaryRayData &prd, PerPixelData &ppd, uint32_t nSamples = 1)
 	{
 		if (prd.objectId < 0)
 			return;
@@ -1032,7 +1028,7 @@ public:
 		//CppSampler sampler(static_cast<uint32_t>(rRec.sampler->next1D() * 100000));
 		for (uint32_t i = 0; i < emitterCount; i++) {
 			uint32_t samplesUsed = 0;
-			ppd.trees[i].sample(scene, rRec.sampler, prd.its->shFrame.n, prd.its->p, samplesUsed, nSamples);
+			ppd.trees[i].sample(scene, sampler, prd.its->shFrame.n, prd.its->p, samplesUsed, nSamples);
 			ppd.samplesUsed += samplesUsed;
 		}
 	}
