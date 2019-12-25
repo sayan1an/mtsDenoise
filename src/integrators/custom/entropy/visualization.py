@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-fileName = "right1.txt"
+fileName = "left1.txt"
 
 f = open(fileName,"r")
 

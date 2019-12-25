@@ -12,6 +12,7 @@ class BaseSampler : public Object
 {
 public:
     virtual Point2f nextSquare() = 0;
+    virtual Point2f nextTriangle() = 0;
     virtual Float next1D() = 0;
     virtual void seed(const Point2i &o) = 0;
 };
@@ -35,6 +36,12 @@ public:
       return sampler->next2D();
     }
 
+    Point2f nextTriangle()
+    {   Point2f rSample = sampler->next2D();
+		Float sample1 = sqrt(rSample.x);
+		return Point2f(1.0f - sample1, sample1 * rSample.y);
+	}
+
     Float next1D()
     {
         return sampler->next1D();
@@ -44,10 +51,10 @@ private:
     Sampler *sampler;
 };
 
-class PoissionDiscSampler : public Object
+class PoissionDiscSampler : public BaseSampler
 {
 public:
-    PoissionDiscSampler(Float radius, uint32_t maxRetries, uint32_t _seed)
+    PoissionDiscSampler(Float radius, uint32_t maxRetries)
     {   
         if (radius >= 1.0f)
             Log(EError, "%s", "PoissionDiscSampler : radius must be smaller than 1\n");
@@ -66,44 +73,40 @@ public:
         activeCache = new Point2f[nGridCells * nGridCells];
         activeCacheSize = 0;
 
-        generator.seed(_seed);
+        generator.seed(10);
 		distribution = std::uniform_real_distribution<float>(0.0f, 1.0f);
     }
-
-    void generateSamples()
+    
+    void seed(const Point2i &o)
     {   
-        for (int i = 0; i < nGridCells * nGridCells; i++)
-            grid[i].x = -1.0f;
-
-        Point2f point(distribution(generator), distribution(generator));
-        insertIntoGrid(point);
-        addToPointCache(point);
-        addToActiveCache(point);
-
-        while (activeCacheSize > 0)
-        {
-            uint32_t random_index = static_cast<uint32_t>(distribution(generator) * activeCacheSize);
-
-            bool found = false;
-            for (uint32_t tries = 0; tries < maxRetries; tries++) {
-                Float theta = distribution(generator) * 2 * M_PI;
-                Float new_radius = radius + distribution(generator) * radius;
-                Point2f pnew(activeCache[random_index].x + new_radius * std::cos(theta),
-                    activeCache[random_index].y + new_radius * std::sin(theta));
-              
-                if (!isValidPoint(pnew))
-                    continue;
-      
-                insertIntoGrid(pnew);
-                addToPointCache(pnew);
-                addToActiveCache(pnew);
-                found = true;
-                break;
-            }
-            if (!found)
-                removeFromActiveCache(random_index);
-        }
+        generator.seed(o.x * 10000 + o.y);
     }
+
+    Point2f nextSquare()
+    {  
+        if (pointCacheSize == 0)
+            generateSamples();
+
+        return pointCache[--pointCacheSize];
+    }
+
+    Point2f nextTriangle()
+    {   
+        if (pointCacheSize == 0)
+            generateSamples();
+
+        Point2f p = pointCache[--pointCacheSize];
+
+        squareToTriangleEric(p);
+
+        return p;
+	}
+
+    Float next1D()
+    {
+        return distribution(generator);
+    }
+
 private:
     uint32_t maxRetries;
     Float radius;
@@ -171,6 +174,54 @@ private:
   
         return true;
     }
+
+    void generateSamples()
+    {   
+        for (int i = 0; i < nGridCells * nGridCells; i++)
+            grid[i].x = -1.0f;
+
+        Point2f point(distribution(generator), distribution(generator));
+        insertIntoGrid(point);
+        addToPointCache(point);
+        addToActiveCache(point);
+
+        while (activeCacheSize > 0)
+        {
+            uint32_t random_index = static_cast<uint32_t>(distribution(generator) * activeCacheSize);
+
+            bool found = false;
+            for (uint32_t tries = 0; tries < maxRetries; tries++) {
+                Float theta = distribution(generator) * 2 * M_PI;
+                Float new_radius = radius + distribution(generator) * radius;
+                Point2f pnew(activeCache[random_index].x + new_radius * std::cos(theta),
+                    activeCache[random_index].y + new_radius * std::sin(theta));
+              
+                if (!isValidPoint(pnew))
+                    continue;
+      
+                insertIntoGrid(pnew);
+                addToPointCache(pnew);
+                addToActiveCache(pnew);
+                found = true;
+                break;
+            }
+            if (!found)
+                removeFromActiveCache(random_index);
+        }
+    }
+
+    inline void squareToTriangleEric(Point2f &p) const
+    {
+        if (p.y > p.x) {
+            p.x *= 0.5f;
+            p.y  -= p.x;
+        }
+        else {
+            p.y *= 0.5f;
+            p.x  -= p.y;
+        }
+    }
+
 
 };
 

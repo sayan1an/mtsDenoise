@@ -274,10 +274,14 @@ struct EmitterNode
 		// However we do rejection sampling, such that we have at least some samples above horzion.
 		while (samplesAboveHorizonCtr < min_samplesAboveHorizon && maxTries-- >= 0) {
 			for (uint32_t i = 0; i < maxSamples; i++) {
-				Point2f rSample = sampler->nextSquare();
+				/*Point2f rSample = sampler->nextSquare();
 				Float sample1 = sqrt(rSample.x);
 				const Point2f p = a * (1.0f - sample1) + b * sample1 * rSample.y +
 					c * sample1 * (1.0f - rSample.y);
+					*/
+				Point2f tSample = sampler->nextTriangle();
+				const Point2f p = a * tSample.x + b * tSample.y +
+					c * (1 - tSample.x - tSample.y);
 
 				Vector worldSpaceDirection = (p.x * emitter->vertexPositions[0] + p.y * emitter->vertexPositions[1] + (1 - p.x - p.y) *  emitter->vertexPositions[2])
 					- reciverPos;
@@ -390,7 +394,7 @@ struct EmitterNode
 		// maxError at this point in code should always be strictly greater than zero
 		// this is because if entropy is non-zero, that means there are some portion of light visible
 		// however, this is true only when entropy is computed non-cooperartively
-		if (maxError * areaDiffuse < 0.001f)
+		if (maxError * areaDiffuse < 0.1f)
 			return false;
 		//std::cout << maxError * areaDiffuse << " " << depth << std::endl;
 		
@@ -825,6 +829,7 @@ public:
         for(auto i = 0; i < nCores; i++) {
             threadData.emplace_back(ThreadData {
                     new  DefaultSampler(sampler_main->clone())
+				//new  PoissionDiscSampler(0.25, 10)
             });
         }
 
@@ -872,7 +877,7 @@ public:
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 			sampler->seed(Point2i(i, j));
-			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 3);
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 10);
 		});
 
 		std::cout << "Finished initial sampling pass." << std::endl;
@@ -896,7 +901,7 @@ public:
 			int i = pixelID % cropSize.x;
 			int j = pixelID / cropSize.x;
 			sampler->seed(Point2i(i, j));
-			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 2);
+			sample(rRec, sampler, gBuffer[pixelID], perPixelData[pixelID], 5);
 		});
 
 		std::cout << "Finished next sampling pass." << std::endl;
